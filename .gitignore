@@ -3,4 +3,8 @@ dist/
 .DS_Store
 .serf/
 *.bak
-/tmp/
+/tmp/MEMORY/
+test_icm/
+knowledge_base/
+wiki/
+package-lock.json
