@@ -1,1 +1,0 @@
-Voice: Professional, direct, concise.
