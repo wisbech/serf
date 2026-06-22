@@ -17,7 +17,20 @@ No daemon. No database. No running process. Just a folder, a protocol, and agent
 
 ## Quick Start
 
-### 1. Install herdr (optional but recommended)
+### 1. Install serf
+
+```bash
+git clone https://github.com/wisbech/serf.git
+cd serf
+npm install -g .
+```
+
+Now `serf` is a global command. Verify:
+```bash
+serf help
+```
+
+### 2. Install herdr (optional but recommended)
 
 Herdr is the terminal substrate — it manages agent panes, detects state (working/blocked/done), and exposes a socket API. Serf uses it when available, falls back to direct LLM calls when not.
 
@@ -25,35 +38,14 @@ Herdr is the terminal substrate — it manages agent panes, detects state (worki
 curl -fsSL https://herdr.dev/install.sh | sh
 ```
 
-### 2. Install serf CLI (optional)
-
-The CLI provides convenience commands (`serf task`, `serf board`, `serf start`). The protocol works without it — agents can read/write the `.serf/` folder directly.
-
-```bash
-git clone https://github.com/wrill/serf.git
-cd serf
-bun build src/index.ts --outdir dist --target bun
-chmod +x dist/index.js
-# Add to PATH or alias:
-alias serf="bun run $(pwd)/src/index.ts"
-```
-
 ### 3. Initialize a project
 
 ```bash
 cd your-project
 serf init
-# Creates .serf/ folder: board/, serfs/, knowledge/, events/
-# Creates master.md identity
-# Creates plan.md
 ```
 
-Or manually:
-```bash
-mkdir -p .serf/board/{backlog,in-progress,review,done}
-mkdir -p .serf/serfs .serf/knowledge/{skills,patterns,failures} .serf/events
-echo "# Plan" > .serf/plan.md
-```
+Creates `.serf/` with board, serfs, knowledge, events, and a master identity.
 
 ### 4. Add a task
 
@@ -61,42 +53,17 @@ echo "# Plan" > .serf/plan.md
 serf task "Explain the difference between TCP and UDP"
 ```
 
-Or write a card manually in `.serf/board/backlog/`:
-
-```markdown
-# Explain TCP vs UDP
-
-## Status
-backlog
-
-## Assigned
-unassigned
-
-## Task
-Explain the difference between TCP and UDP in 3 paragraphs.
-
-## Acceptance
-- GAN critic passes
-- Technically accurate
-```
-
 ### 5. Tell your agent to work
-
-Point your coding agent at the protocol:
 
 ```
 Read SERF.md and follow the protocol. Pick up a task from .serf/board/ and execute it.
 ```
-
-That's it. The agent reads the protocol, finds the task, executes it, critiques it, writes the result, and leaves. The `.serf/` folder tracks everything.
 
 ### 6. Check the board
 
 ```bash
 serf board
 ```
-
-Or read `.serf/board/done/` directly — each card is a markdown file with the task, output, quality score, and context.
 
 ## How It Works
 
