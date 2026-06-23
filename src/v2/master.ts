@@ -4,6 +4,7 @@ import { addTask, readCard, moveCard, writeCard, listCards, type Card } from "./
 import { readSerf, listSerfs, createSerf, morphSerf, MASTER_IDENTITY, type SerfIdentity } from "./serf";
 import { appendEvent } from "./events";
 import * as herdr from "./herdr";
+import { loadConfig } from "../state";
 
 const MAX_RETRIES = 3;
 
@@ -22,11 +23,17 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
     maxSpendPerHarvest: 5.0,
   });
 
-  const useHerdr = options.useHerdr ?? herdr.isHerdrRunning();
+  const herdrRunning = herdr.isHerdrRunning();
+  const useHerdr = options.useHerdr ?? herdrRunning;
 
-  if (useHerdr && !herdr.isHerdrRunning()) {
-    console.log("\n  ⚠ herdr socket not found. Install herdr: curl -fsSL https://herdr.dev/install.sh | sh");
-    console.log("  Falling back to direct LLM mode.\n");
+  if (useHerdr && !herdrRunning) {
+    console.log("\n  ⚠ herdr socket not found. Falling back to direct LLM mode.\n");
+  }
+
+  if (useHerdr && herdrRunning) {
+    console.log("  (herdr detected — will spawn panes for executor + critic)");
+  } else {
+    console.log("  (direct LLM mode — no herdr)");
   }
 
   const inProgress = listCards("in-progress");
@@ -44,7 +51,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
       console.log("\n  ⚠ Budget exceeded. Remaining tasks deferred.\n");
       break;
     }
-    await processCard(card, budget, options.model, useHerdr && herdr.isHerdrRunning());
+    await processCard(card, budget, options.model, useHerdr && herdrRunning);
   }
 }
 
@@ -54,64 +61,139 @@ async function processCard(card: Card, budget: BudgetTracker, model?: string, us
   moveCard(card.id, "in-progress");
   appendEvent("task.started", { card: card.id, title: card.title });
 
-  if (useHerdr) {
-    await processWithHerdr(card, budget, model);
-  } else {
+  let herdrMode = useHerdr;
+
+  if (herdrMode) {
+    try {
+      await processWithHerdr(card, budget, model);
+      return;
+    } catch (err) {
+      console.log(`  ⚠ herdr mode failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.log(`  Falling back to direct LLM mode.\n`);
+      herdrMode = false;
+    }
+  }
+
+  if (!herdrMode) {
     await processWithLLM(card, budget, model);
   }
 }
 
 async function processWithHerdr(card: Card, budget: BudgetTracker, model?: string): Promise<void> {
-  try {
-    const ws = await herdr.createWorkspace(card.title.slice(0, 40), process.cwd());
-    const executorPane = await herdr.splitPane(ws.workspace_id, "right");
-    const criticPane = await herdr.splitPane(ws.workspace_id, "down");
+  const config = loadConfig();
+  const agentModel = model || config?.model || "qwen3.5";
+  const transport = config?.transport || "ollama";
 
-    let attempt = 0;
-    let lastFeedback = "";
+  // Create a workspace for this task
+  const ws = await herdr.createWorkspace(card.title.slice(0, 40), process.cwd());
+  console.log(`  → herdr workspace: ${ws.workspace_id}`);
 
-    while (attempt < MAX_RETRIES) {
-      attempt++;
+  // Determine which agent command to run in panes
+  // For ollama: use `ollama run <model>` and pipe the prompt
+  // For pi: use `pi --model <model>`
+  // For claude: use `claude --model <model>`
+  let agentCmd: string;
+  let agentArgs: string[];
+  if (transport === "ollama") {
+    agentCmd = "ollama";
+    agentArgs = ["run", agentModel];
+  } else if (transport === "pi") {
+    agentCmd = "pi";
+    agentArgs = ["--model", agentModel, "--no-skills", "--no-extensions"];
+  } else if (transport === "claude") {
+    agentCmd = "claude";
+    agentArgs = ["--model", agentModel];
+  } else {
+    agentCmd = transport;
+    agentArgs = ["--model", agentModel];
+  }
 
-      const executorPrompt = buildExecutionPrompt(card, lastFeedback, attempt);
-      const executorSystem = buildMasterSystemPrompt();
+  // Start executor agent in a pane
+  const executorPane = await herdr.startAgent("executor", agentCmd, agentArgs, {
+    workspaceId: ws.workspace_id,
+    cwd: process.cwd(),
+    split: "right",
+  });
+  console.log(`  → executor pane: ${executorPane.pane_id} (${agentCmd} ${agentArgs.join(" ")})`);
 
-      await herdr.sendKeys(executorPane.pane_id, [executorPrompt, "enter"]);
-      const executorState = await herdr.waitForState(executorPane.pane_id, "done", 180_000);
+  // Start critic agent in a pane — same model, different role
+  const criticPane = await herdr.startAgent("critic", agentCmd, agentArgs, {
+    workspaceId: ws.workspace_id,
+    cwd: process.cwd(),
+    split: "down",
+  });
+  console.log(`  → critic pane: ${criticPane.pane_id}`);
 
-      if (executorState === "blocked") {
-        console.log(`    ⚠ Executor blocked on attempt ${attempt}`);
-        lastFeedback = "The executor was blocked. Simplify the task.";
-        continue;
-      }
+  let attempt = 0;
+  let lastFeedback = "";
 
-      const executorOutput = await herdr.readPane(executorPane.pane_id, 200);
+  while (attempt < MAX_RETRIES) {
+    attempt++;
 
-      const result = await callLLM(executorOutput, { budgetTracker: budget, model });
-      const { verdict } = await critique(card.task, result.text, card.acceptance);
+    const executorPrompt = buildExecutionPrompt(card, lastFeedback, attempt);
 
-      console.log(`    Critic: ${verdict.verdict} (${verdict.confidence.toFixed(2)})`);
+    // Send the task to the executor pane
+    await herdr.reportAgentState(executorPane.pane_id, "executor", "working", `attempt ${attempt}`);
+    await herdr.sendInput(executorPane.pane_id, executorPrompt);
+    console.log(`    → Sent task to executor (attempt ${attempt})`);
 
-      if (isPass(verdict)) {
-        finishCard(card, result.text, verdict.verdict === "pass" ? verdict.confidence : 0.5, budget);
-        appendEvent("task.completed", { card: card.id, quality: verdict.confidence, attempt });
-        console.log(`    ✓ Completed (quality: ${(verdict.confidence * 100).toFixed(0)}%)\n`);
-        await herdr.closeWorkspace(ws.workspace_id);
-        return;
-      }
+    // Wait for the executor to finish (check herdr state)
+    const executorState = await herdr.waitForState(executorPane.pane_id, "done", 300_000);
+    console.log(`    → Executor state: ${executorState}`);
 
-      lastFeedback = `Previous attempt rejected. Issues: ${verdict.issues.join(", ")}. ${verdict.reasoning}`;
-      appendEvent("task.retry", { card: card.id, attempt, issues: verdict.issues });
+    // Read the executor's output from the pane
+    const executorOutput = await herdr.readPane(executorPane.pane_id, 200);
+    console.log(`    → Read ${executorOutput.length} chars from executor`);
+
+    // Send the output to the critic pane for evaluation
+    const criticPrompt = `Evaluate this response to a task.\n\nTASK: ${card.task}\n\nRESPONSE: ${executorOutput.slice(0, 3000)}\n\nRespond with:\nVERDICT: pass | fail\nCONFIDENCE: 0.0 to 1.0\nISSUES: comma-separated (or "none")\nREASONING: one sentence`;
+
+    await herdr.reportAgentState(criticPane.pane_id, "critic", "working", "evaluating");
+    await herdr.sendInput(criticPane.pane_id, criticPrompt);
+
+    // Wait for critic to finish
+    const criticState = await herdr.waitForState(criticPane.pane_id, "done", 120_000);
+    const criticOutput = await herdr.readPane(criticPane.pane_id, 50);
+
+    // Parse the critic's verdict from the pane output
+    const verdict = parseVerdictFromPane(criticOutput);
+    console.log(`    Critic: ${verdict.verdict} (${verdict.confidence.toFixed(2)}) ${verdict.issues.length > 0 ? verdict.issues.join(", ") : ""}`);
+
+    await herdr.reportAgentState(criticPane.pane_id, "critic", "done", verdict.verdict);
+
+    if (isPass(verdict)) {
+      const quality = verdict.verdict === "pass" ? verdict.confidence : 0.5;
+      finishCard(card, executorOutput, quality, budget);
+      appendEvent("task.completed", { card: card.id, quality, attempt });
+      console.log(`    ✓ Completed (quality: ${(quality * 100).toFixed(0)}%)\n`);
+      console.log(`  → Output visible in herdr pane: ${executorPane.pane_id}`);
+      console.log(`  → Critic verdict in herdr pane: ${criticPane.pane_id}`);
+      return;
     }
 
-    moveCard(card.id, "review");
-    appendEvent("task.failed", { card: card.id, reason: "max-retries", attempts: attempt });
-    console.log(`    ✗ Failed after ${MAX_RETRIES} attempts.\n`);
-    await herdr.closeWorkspace(ws.workspace_id);
-  } catch (err) {
-    console.log(`    ⚠ herdr error: ${err instanceof Error ? err.message : String(err)}. Falling back to LLM mode.`);
-    await processWithLLM(card, budget, model);
+    lastFeedback = `Previous attempt rejected. Issues: ${verdict.issues.join(", ")}. ${verdict.reasoning}`;
+    appendEvent("task.retry", { card: card.id, attempt, issues: verdict.issues });
   }
+
+  await herdr.reportAgentState(executorPane.pane_id, "executor", "done", "failed");
+  moveCard(card.id, "review");
+  appendEvent("task.failed", { card: card.id, reason: "max-retries", attempts: attempt });
+  console.log(`    ✗ Failed after ${MAX_RETRIES} attempts. Card moved to review.\n`);
+  console.log(`  → Review output in herdr panes: ${executorPane.pane_id}, ${criticPane.pane_id}`);
+}
+
+function parseVerdictFromPane(text: string): CriticVerdict {
+  const verdictMatch = text.match(/VERDICT:\s*(pass|fail)/i);
+  const confidenceMatch = text.match(/CONFIDENCE:\s*([\d.]+)/i);
+  const issuesMatch = text.match(/ISSUES:\s*(.+)/i);
+  const reasoningMatch = text.match(/REASONING:\s*(.+)/i);
+
+  return {
+    verdict: (verdictMatch?.[1]?.toLowerCase() ?? "fail") as "pass" | "fail",
+    confidence: confidenceMatch ? parseFloat(confidenceMatch[1]) : 0.5,
+    issues: issuesMatch ? issuesMatch[1].split(",").map(s => s.trim()).filter(s => s !== "none" && s.length > 0) : [],
+    reasoning: reasoningMatch?.[1]?.trim() ?? "",
+  };
 }
 
 async function processWithLLM(card: Card, budget: BudgetTracker, model?: string): Promise<void> {
@@ -179,7 +261,7 @@ You can morph your approach based on the task:
 - Research task → be skeptical, cite sources, verify claims
 - Writing task → be clear, structured, concise
 - Analysis task → be thorough, show reasoning, consider alternatives
-- Code task → be precise, test assumptions, handle edge cases
+- Design task → be concrete, propose mechanisms, show how it works
 
 Available serfs for reference:
 ${serfList}

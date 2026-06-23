@@ -178,6 +178,23 @@ export function spawnAgent(paneId: string, command: string, args: string[] = [])
   return sendInput(paneId, `${command} ${args.join(" ")}\n`);
 }
 
+export async function startAgent(name: string, command: string, args: string[], options?: {
+  workspaceId?: string;
+  cwd?: string;
+  split?: "right" | "down";
+}): Promise<PaneInfo> {
+  const params: Record<string, unknown> = {
+    name,
+    command: [command, ...args],
+  };
+  if (options?.workspaceId) params.workspace_id = options.workspaceId;
+  if (options?.cwd) params.cwd = options.cwd;
+  if (options?.split) params.split = options.split;
+
+  const result = await send("agent.start", params);
+  return result.pane || result.agent;
+}
+
 export function ensureHerdr(): boolean {
   if (isHerdrRunning()) return true;
 
