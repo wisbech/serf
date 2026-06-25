@@ -44,7 +44,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
     harness = await HerdrHarness.create(options.model);
   }
 
-  // Event-driven loop — no polling
+  // Continuous dialogue loop
   while (true) {
     const cards = [...listCards("in-progress"), ...listCards("backlog")];
 
@@ -54,10 +54,10 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
         break;
       }
 
-      // Phase 3: continuous dialogue — ask the user what to work on
+      // Survey the project + board, show the user what's going on, then ask
+      await projectReview(options.model);
       const taskDescription = await askUser();
       if (taskDescription === null) {
-        // User exited
         console.log("\n  Goodbye.\n");
         break;
       }
@@ -579,6 +579,64 @@ async function askUser(): Promise<string | null> {
       }
     });
   });
+}
+
+async function projectReview(model?: string): Promise<void> {
+  const serfDir = getSerfDir();
+  const cwd = process.cwd();
+
+  const projectFiles = scanProjectForIntake(cwd);
+  const planMd = existsSync(join(serfDir, "plan.md")) ? readFileSync(join(serfDir, "plan.md"), "utf-8").slice(0, 800) : "";
+  const knowledgeSkills = listKnowledgeForIntake(serfDir, "skills");
+  const knowledgeFailures = listKnowledgeForIntake(serfDir, "failures");
+  const boardCards = listBoardCardsForIntake(serfDir);
+  const allCards = listCards();
+
+  const prompt = `You are the master serf for a project. Survey the project and give the user a brief, honest overview of what this project is, what's on the board, what's been learned, and what might be worth working on.
+
+PROJECT STRUCTURE:
+${projectFiles}
+
+PLAN:
+${planMd}
+
+KNOWLEDGE (skills):
+${knowledgeSkills}
+
+PAST FAILURES:
+${knowledgeFailures}
+
+BOARD:
+${boardCards}
+
+Respond with EXACTLY this format:
+
+PROJECT: <2-3 sentences: what this project is, language, what it does>
+BOARD: <1-2 sentences: what's on the board right now, or "empty">
+STATUS: <1 sentence: what's been done recently, what's in progress, what's stuck>
+SUGGESTIONS: <2-4 bullet points of what might be worth working on, based on the project state and knowledge. Each starts with "- ">`;
+
+  console.log(`  Reviewing project...`);
+  const { text } = await callLLM(prompt, { model });
+
+  const project = text.match(/PROJECT:\s*(.+?)(?=\n(?:BOARD|STATUS|SUGGESTIONS|$$))/s)?.[1]?.trim() ?? "";
+  const board = text.match(/BOARD:\s*(.+?)(?=\n(?:STATUS|SUGGESTIONS|$$))/s)?.[1]?.trim() ?? "";
+  const status = text.match(/STATUS:\s*(.+?)(?=\n(?:SUGGESTIONS|$$))/s)?.[1]?.trim() ?? "";
+  const suggestions = text.match(/SUGGESTIONS:\s*(.+?)(?:\n$$|$)/s)?.[1]?.trim() ?? "";
+
+  console.log(`\n  ╔══ MASTER SERF — PROJECT REVIEW ═════════════`);
+  console.log(`  ║`);
+  if (project) { console.log(`  ║ ${project}`); console.log(`  ║`); }
+  if (board) { console.log(`  ║ Board: ${board}`); console.log(`  ║`); }
+  if (status) { console.log(`  ║ Status: ${status}`); console.log(`  ║`); }
+  if (suggestions && suggestions.toLowerCase() !== "none") {
+    console.log(`  ║ Suggestions:`);
+    for (const line of suggestions.split("\n").filter(l => l.trim())) {
+      console.log(`  ║   ${line.replace(/^[-*]\s*/, "").trim()}`);
+    }
+    console.log(`  ║`);
+  }
+  console.log(`  ╚══════════════════════════════════════════════\n`);
 }
 
 async function interactiveIntake(description: string, model?: string): Promise<void> {
