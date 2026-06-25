@@ -32,6 +32,7 @@ async function main() {
 function handleInit() {
   const { existsSync, mkdirSync, writeFileSync } = require("node:fs");
   const { join } = require("node:path");
+  const { execSync } = require("node:child_process");
   const { getSerfDir } = require("./v2/paths");
   const dir = getSerfDir();
 
@@ -105,8 +106,86 @@ If I keep passing bad work, I'm not adversarial enough. If I keep failing good w
   console.log("    ├── worktrees/      (per-task isolated checkouts)");
   console.log("    ├── events/         (audit trail)");
   console.log("    └── plan.md         (edit this with your mission)");
-  console.log("\n  Next: serf task \"do something\"");
-  console.log("  Then: serf start  to process the board\n");
+
+  // Check for coding agents and offer herdr integration setup
+  checkIntegrations();
+
+  console.log("\n  Next: serf start  (launches your coding agent as the master serf)");
+  console.log("  Or:   serf task \"do something\"  (add a task directly)\n");
+}
+
+// ── INTEGRATION CHECK ──
+
+const HERDR_INTEGRATIONS: Record<string, string> = {
+  claude: "claude",
+  opencode: "opencode",
+  codex: "codex",
+  pi: "pi",
+  aider: "omp",
+  hermes: "hermes",
+  cursor: "cursor",
+};
+
+function isInstalled(cmd: string): boolean {
+  try {
+    require("node:child_process").execSync(`which ${cmd} 2>/dev/null`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function checkIntegrations(): void {
+  const { execSync } = require("node:child_process");
+
+  const found: string[] = [];
+  for (const agent of Object.keys(HERDR_INTEGRATIONS)) {
+    if (isInstalled(agent)) found.push(agent);
+  }
+
+  if (found.length === 0) {
+    console.log("\n  ⚠ No coding agents found on PATH.");
+    console.log("    Install one: claude, opencode, aider, pi, hermes, or codex");
+    return;
+  }
+
+  console.log(`\n  Coding agents found: ${found.join(", ")}`);
+
+  const herdrInstalled = isInstalled("herdr");
+  if (!herdrInstalled) {
+    console.log("\n  herdr not found (optional — enables multi-pane agent management)");
+    console.log("    Install: curl -fsSL https://herdr.dev/install.sh | sh");
+    return;
+  }
+
+  // herdr is installed — check which integrations are already installed
+  let installedIntegrations: string[] = [];
+  try {
+    const output = execSync("herdr integration status 2>/dev/null", { encoding: "utf-8", stdio: "pipe" });
+    for (const agent of found) {
+      if (output.includes(agent)) installedIntegrations.push(agent);
+    }
+  } catch {}
+
+  const needsIntegration = found.filter(a => !installedIntegrations.includes(a));
+
+  if (needsIntegration.length === 0) {
+    console.log("  ✓ herdr integrations already installed for all detected agents");
+    return;
+  }
+
+  console.log(`\n  herdr found. Missing integrations for: ${needsIntegration.join(", ")}`);
+  console.log("  Installing...");
+
+  for (const agent of needsIntegration) {
+    const integration = HERDR_INTEGRATIONS[agent];
+    try {
+      execSync(`herdr integration install ${integration}`, { stdio: "inherit" });
+      console.log(`    ✓ ${agent} integration installed`);
+    } catch {
+      console.log(`    ✗ ${agent} integration failed (run: herdr integration install ${integration})`);
+    }
+  }
 }
 
 // ── TASK ──
