@@ -196,161 +196,7 @@ async function handleStart(args: string[]) {
     saveConfig(config);
   }
 
-  const taskDescription = args.filter(a => !a.startsWith("--")).join(" ");
-
-  if (taskDescription) {
-    await interactiveIntake(taskDescription, model);
-  }
-
   await startMaster({ budgetLimit, model, once: onceFlag });
-}
-
-// ── INTERACTIVE INTAKE ──
-
-async function interactiveIntake(description: string, model?: string): Promise<void> {
-  const { callLLM } = await import("./v2/llm");
-  const { addTask } = await import("./v2/board");
-  const { existsSync, readdirSync, readFileSync, statSync } = require("node:fs");
-  const { join } = require("node:path");
-  const { getSerfDir } = await import("./v2/paths");
-  const readline = require("readline");
-
-  const serfDir = getSerfDir();
-  const cwd = process.cwd();
-
-  const projectFiles = scanProject(cwd);
-  const planMd = existsSync(join(serfDir, "plan.md")) ? readFileSync(join(serfDir, "plan.md"), "utf-8").slice(0, 500) : "";
-  const knowledgeSkills = listKnowledge(serfDir, "skills");
-  const knowledgeFailures = listKnowledge(serfDir, "failures");
-  const boardCards = listBoardCards(serfDir);
-
-  const prompt = `You are the master serf for a project. A user wants to add a task: "${description}".
-
-Survey the project and propose a formal task card.
-
-PROJECT STRUCTURE:
-${projectFiles}
-
-PLAN:
-${planMd}
-
-KNOWLEDGE (skills):
-${knowledgeSkills}
-
-PAST FAILURES:
-${knowledgeFailures}
-
-CURRENT BOARD:
-${boardCards}
-
-Respond with EXACTLY this format:
-
-INTRO: <1-2 sentences: who you are, what the project is, what's going on>
-QUESTIONS: <clarifying questions if the task is ambiguous, or "none" if clear>
-TASK: <the formal task title — concise, actionable>
-ACCEPTANCE: <bullet list, one per line, each starting with "- ", specific and falsifiable>
-CONTEXT: <relevant context from the codebase, or "none">`;
-
-  console.log(`\n  Master is surveying the project...`);
-  const { text } = await callLLM(prompt, { model });
-
-  const intro = text.match(/INTRO:\s*(.+?)(?=\n(?:QUESTIONS|TASK|ACCEPTANCE|CONTEXT|$$))/s)?.[1]?.trim() ?? "";
-  const questions = text.match(/QUESTIONS:\s*(.+?)(?=\n(?:TASK|ACCEPTANCE|CONTEXT|$$))/s)?.[1]?.trim() ?? "";
-  const taskTitle = text.match(/TASK:\s*(.+)/)?.[1]?.trim() ?? description;
-  const acceptanceBlock = text.match(/ACCEPTANCE:\s*(.+?)(?=\n(?:CONTEXT|$$))/s)?.[1]?.trim() ?? "";
-  const context = text.match(/CONTEXT:\s*(.+?)(?:\n$$|$)/s)?.[1]?.trim() ?? "";
-
-  console.log(`\n  ╔══ MASTER SERF ══════════════════════════════`);
-  console.log(`  ║ ${intro}`);
-  if (questions && questions.toLowerCase() !== "none") {
-    console.log(`  ║`);
-    console.log(`  ║ Questions:`);
-    for (const q of questions.split("\n").filter((l: string) => l.trim())) {
-      console.log(`  ║   ${q.trim()}`);
-    }
-  }
-  console.log(`  ║`);
-  console.log(`  ║ Proposed task:`);
-  console.log(`  ║   Task: ${taskTitle}`);
-  console.log(`  ║   Acceptance:`);
-  for (const line of acceptanceBlock.split("\n").filter((l: string) => l.trim())) {
-    console.log(`  ║     ${line.replace(/^[-*]\s*/, "").trim()}`);
-  }
-  if (context && context.toLowerCase() !== "none") {
-    console.log(`  ║   Context: ${context.slice(0, 200)}`);
-  }
-  console.log(`  ╚════════════════════════════════════════════\n`);
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>(resolve => {
-    rl.question("  Approve? (y/n) ", a => { rl.close(); resolve(a.trim().toLowerCase()); });
-  });
-
-  if (answer === "y" || answer === "yes") {
-    const acceptance = acceptanceBlock
-      .split("\n")
-      .map((l: string) => l.replace(/^[-*]\s*/, "").trim())
-      .filter((l: string) => l.length > 0);
-    const card = addTask(taskTitle, taskTitle, acceptance.length > 0 ? acceptance : ["GAN critic passes"]);
-    console.log(`\n  ✓ Task added to backlog: ${card.id}\n`);
-  } else {
-    console.log(`\n  Task not added.\n`);
-  }
-}
-
-function scanProject(cwd: string): string {
-  const { readdirSync, statSync, existsSync } = require("node:fs");
-  const { join } = require("node:path");
-
-  const lines: string[] = [];
-  try {
-    const entries = readdirSync(cwd).filter((f: string) => !f.startsWith(".") && f !== "node_modules" && f !== "dist" && f !== "target");
-    for (const entry of entries.slice(0, 30)) {
-      const full = join(cwd, entry);
-      const stat = statSync(full);
-      if (stat.isDirectory()) {
-        lines.push(`  ${entry}/`);
-      } else {
-        lines.push(`  ${entry}`);
-      }
-    }
-  } catch {}
-
-  let pkgInfo = "";
-  if (existsSync(join(cwd, "package.json"))) {
-    try {
-      const pkg = JSON.parse(require("node:fs").readFileSync(join(cwd, "package.json"), "utf-8"));
-      pkgInfo = `\npackage.json: ${pkg.name ?? "?"} v${pkg.version ?? "?"} — ${pkg.description ?? ""}`.trim();
-    } catch {}
-  }
-
-  return `Files:\n${lines.join("\n")}${pkgInfo ? "\n\n" + pkgInfo : ""}`;
-}
-
-function listKnowledge(serfDir: string, subdir: string): string {
-  const { existsSync, readdirSync, readFileSync } = require("node:fs");
-  const { join } = require("node:path");
-  const dir = join(serfDir, "knowledge", subdir);
-  if (!existsSync(dir)) return "none";
-  const files = readdirSync(dir).filter((f: string) => f.endsWith(".md")).slice(-5);
-  if (files.length === 0) return "none";
-  return files.map((f: string) => `- ${f.replace(/\.md$/, "")}`).join("\n");
-}
-
-function listBoardCards(serfDir: string): string {
-  const { existsSync, readdirSync } = require("node:fs");
-  const { join } = require("node:path");
-  const cols = ["backlog", "in-progress", "review", "done"];
-  const lines: string[] = [];
-  for (const col of cols) {
-    const dir = join(serfDir, "board", col);
-    if (!existsSync(dir)) continue;
-    const files = readdirSync(dir).filter((f: string) => f.endsWith(".md"));
-    if (files.length > 0) {
-      lines.push(`${col} (${files.length}): ${files.map((f: string) => f.replace(/\.md$/, "")).join(", ")}`);
-    }
-  }
-  return lines.length > 0 ? lines.join("\n") : "empty";
 }
 
 // ── HEALTH ──
@@ -478,7 +324,7 @@ SERF — dark factory for coding agents
 USAGE:
   serf init                          Create .serf/ in current project
   serf task "do something"           Add a task to the board
-  serf start ["task description"]     Process board, or discuss task with master first
+  serf start                          Launch master agent — surveys project, talks with you, processes tasks
   serf board                         Show the kanban board
   serf agents [list|use <name>]      List or select coding agent
   serf config [show|set <k> <v>]     Show or set config
@@ -486,10 +332,11 @@ USAGE:
   serf board move <id> <column>      Move a card between columns
 
 INTERACTIVE MODE:
-  serf start "add a login page"      Master surveys project, proposes task, you approve
-  serf start                         Board empty → master asks "what to work on?"
-                                     Task done → master asks "what's next?"
-                                     This is the default way to use serf.
+  serf start                          The default way to use serf. Launches your coding
+                                     agent as the master serf. It surveys the project,
+                                     shows you what's going on, discusses what to work
+                                     on, writes the task to the board, and processes it.
+                                     After each task it asks "what's next?"
 
 AGENTS:
   claude, opencode, aider, pi, hermes, codex (headless — run in terminal, capture output)

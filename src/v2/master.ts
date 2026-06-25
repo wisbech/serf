@@ -1,16 +1,16 @@
 import { callLLM, BudgetTracker } from "./llm";
 import { critique, classifyVerdict, parseVerdict, type CriticVerdict } from "./critic";
 import { critiqueMultipass, classifyMultipass, type MultiPassVerdict, type Effort, type CuriosityPoint, EFFORT_PASSES, type CritiqueFn } from "./critic_multipass";
-import { readCard, moveCard, writeCard, listCards, addTask, type Card } from "./board";
+import { readCard, moveCard, writeCard, listCards, type Card } from "./board";
 import { readSerf, listSerfs, createSerf, type SerfIdentity } from "./serf";
 import { appendEvent } from "./events";
 import * as herdr from "./herdr";
 import { HerdrAgent } from "./herdr";
-import { spawnAgent, buildAgentPrompt, buildCriticAgentPrompt, buildCriticFollowupPrompt, buildCriticResolvePrompt } from "./executor";
+import { spawnAgent, buildAgentPrompt, buildMasterPrompt, buildCriticAgentPrompt, buildCriticFollowupPrompt, buildCriticResolvePrompt } from "./executor";
 import { getSerfDir, ensureDir } from "./paths";
 import { loadConfig } from "../state";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, watch, readdirSync, statSync, execSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, execSync, symlinkSync } from "node:fs";
 
 const MAX_RETRIES = 3;
 const AGREEMENT_THRESHOLD = 0.7;
@@ -54,16 +54,22 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
         break;
       }
 
-      // Survey the project + board, show the user what's going on, then ask
-      await projectReview(options.model);
-      const taskDescription = await askUser();
-      if (taskDescription === null) {
-        console.log("\n  Goodbye.\n");
-        break;
+      // Spawn the master agent — it surveys the project, talks with the user,
+      // writes tasks to the board, and processes them. The agent IS the dialogue.
+      console.log("\n  Starting master agent for project review and task intake...\n");
+      const config = loadConfig();
+      const agentName = config?.agent ?? "claude";
+      const masterPrompt = buildMasterPrompt();
+      const execResult = await spawnAgent(masterPrompt, {
+        cwd: process.cwd(),
+        timeoutMs: 0,
+        agent: agentName,
+        model: options.model || config?.model,
+      });
+      if (!execResult.ok) {
+        console.log(`  ⚠ Master agent ended: ${execResult.warnings.join(", ")}`);
       }
-      if (taskDescription.trim().length > 0) {
-        await interactiveIntake(taskDescription, options.model);
-      }
+      // After the agent exits, check if it wrote any cards
       continue;
     }
 
@@ -563,222 +569,10 @@ function removeWorktree(card: Card, merge: boolean): void {
   try { execSync(`git branch -D ${card.id} 2>/dev/null`, { stdio: "pipe" }); } catch {}
 }
 
-// ── INTERACTIVE INTAKE ──
-
-async function askUser(): Promise<string | null> {
-  const readline = await import("node:readline");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => {
-    rl.question("\n  What would you like to work on? (or 'exit' to quit) ", answer => {
-      rl.close();
-      const trimmed = answer.trim();
-      if (trimmed === "exit" || trimmed === "quit" || trimmed === "q") {
-        resolve(null);
-      } else {
-        resolve(trimmed);
-      }
-    });
-  });
-}
-
-async function projectReview(model?: string): Promise<void> {
-  const serfDir = getSerfDir();
-  const cwd = process.cwd();
-
-  const projectFiles = scanProjectForIntake(cwd);
-  const planMd = existsSync(join(serfDir, "plan.md")) ? readFileSync(join(serfDir, "plan.md"), "utf-8").slice(0, 800) : "";
-  const knowledgeSkills = listKnowledgeForIntake(serfDir, "skills");
-  const knowledgeFailures = listKnowledgeForIntake(serfDir, "failures");
-  const boardCards = listBoardCardsForIntake(serfDir);
-  const allCards = listCards();
-
-  const prompt = `You are the master serf for a project. Survey the project and give the user a brief, honest overview of what this project is, what's on the board, what's been learned, and what might be worth working on.
-
-PROJECT STRUCTURE:
-${projectFiles}
-
-PLAN:
-${planMd}
-
-KNOWLEDGE (skills):
-${knowledgeSkills}
-
-PAST FAILURES:
-${knowledgeFailures}
-
-BOARD:
-${boardCards}
-
-Respond with EXACTLY this format:
-
-PROJECT: <2-3 sentences: what this project is, language, what it does>
-BOARD: <1-2 sentences: what's on the board right now, or "empty">
-STATUS: <1 sentence: what's been done recently, what's in progress, what's stuck>
-SUGGESTIONS: <2-4 bullet points of what might be worth working on, based on the project state and knowledge. Each starts with "- ">`;
-
-  console.log(`  Reviewing project...`);
-  const { text } = await callLLM(prompt, { model });
-
-  const project = text.match(/PROJECT:\s*(.+?)(?=\n(?:BOARD|STATUS|SUGGESTIONS|$$))/s)?.[1]?.trim() ?? "";
-  const board = text.match(/BOARD:\s*(.+?)(?=\n(?:STATUS|SUGGESTIONS|$$))/s)?.[1]?.trim() ?? "";
-  const status = text.match(/STATUS:\s*(.+?)(?=\n(?:SUGGESTIONS|$$))/s)?.[1]?.trim() ?? "";
-  const suggestions = text.match(/SUGGESTIONS:\s*(.+?)(?:\n$$|$)/s)?.[1]?.trim() ?? "";
-
-  console.log(`\n  ╔══ MASTER SERF — PROJECT REVIEW ═════════════`);
-  console.log(`  ║`);
-  if (project) { console.log(`  ║ ${project}`); console.log(`  ║`); }
-  if (board) { console.log(`  ║ Board: ${board}`); console.log(`  ║`); }
-  if (status) { console.log(`  ║ Status: ${status}`); console.log(`  ║`); }
-  if (suggestions && suggestions.toLowerCase() !== "none") {
-    console.log(`  ║ Suggestions:`);
-    for (const line of suggestions.split("\n").filter(l => l.trim())) {
-      console.log(`  ║   ${line.replace(/^[-*]\s*/, "").trim()}`);
-    }
-    console.log(`  ║`);
-  }
-  console.log(`  ╚══════════════════════════════════════════════\n`);
-}
-
-async function interactiveIntake(description: string, model?: string): Promise<void> {
-  const serfDir = getSerfDir();
-  const cwd = process.cwd();
-
-  const projectFiles = scanProjectForIntake(cwd);
-  const planMd = existsSync(join(serfDir, "plan.md")) ? readFileSync(join(serfDir, "plan.md"), "utf-8").slice(0, 500) : "";
-  const knowledgeSkills = listKnowledgeForIntake(serfDir, "skills");
-  const knowledgeFailures = listKnowledgeForIntake(serfDir, "failures");
-  const boardCards = listBoardCardsForIntake(serfDir);
-
-  const prompt = `You are the master serf for a project. A user wants to add a task: "${description}".
-
-Survey the project and propose a formal task card.
-
-PROJECT STRUCTURE:
-${projectFiles}
-
-PLAN:
-${planMd}
-
-KNOWLEDGE (skills):
-${knowledgeSkills}
-
-PAST FAILURES:
-${knowledgeFailures}
-
-CURRENT BOARD:
-${boardCards}
-
-Respond with EXACTLY this format:
-
-INTRO: <1-2 sentences: who you are, what the project is, what's going on>
-QUESTIONS: <clarifying questions if the task is ambiguous, or "none" if clear>
-TASK: <the formal task title — concise, actionable>
-ACCEPTANCE: <bullet list, one per line, each starting with "- ", specific and falsifiable>
-CONTEXT: <relevant context from the codebase, or "none">`;
-
-  console.log(`  Master is surveying the project...`);
-  const { text } = await callLLM(prompt, { model });
-
-  const intro = text.match(/INTRO:\s*(.+?)(?=\n(?:QUESTIONS|TASK|ACCEPTANCE|CONTEXT|$$))/s)?.[1]?.trim() ?? "";
-  const questions = text.match(/QUESTIONS:\s*(.+?)(?=\n(?:TASK|ACCEPTANCE|CONTEXT|$$))/s)?.[1]?.trim() ?? "";
-  const taskTitle = text.match(/TASK:\s*(.+)/)?.[1]?.trim() ?? description;
-  const acceptanceBlock = text.match(/ACCEPTANCE:\s*(.+?)(?=\n(?:CONTEXT|$$))/s)?.[1]?.trim() ?? "";
-  const context = text.match(/CONTEXT:\s*(.+?)(?:\n$$|$)/s)?.[1]?.trim() ?? "";
-
-  console.log(`\n  ╔══ MASTER SERF ══════════════════════════════`);
-  console.log(`  ║ ${intro}`);
-  if (questions && questions.toLowerCase() !== "none") {
-    console.log(`  ║`);
-    console.log(`  ║ Questions:`);
-    for (const q of questions.split("\n").filter(l => l.trim())) {
-      console.log(`  ║   ${q.trim()}`);
-    }
-  }
-  console.log(`  ║`);
-  console.log(`  ║ Proposed task:`);
-  console.log(`  ║   Task: ${taskTitle}`);
-  console.log(`  ║   Acceptance:`);
-  for (const line of acceptanceBlock.split("\n").filter(l => l.trim())) {
-    console.log(`  ║     ${line.replace(/^[-*]\s*/, "").trim()}`);
-  }
-  if (context && context.toLowerCase() !== "none") {
-    console.log(`  ║   Context: ${context.slice(0, 200)}`);
-  }
-  console.log(`  ╚════════════════════════════════════════════\n`);
-
-  const readline = await import("node:readline");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>(resolve => {
-    rl.question("  Approve? (y/n) ", a => { rl.close(); resolve(a.trim().toLowerCase()); });
-  });
-
-  if (answer === "y" || answer === "yes") {
-    const acceptance = acceptanceBlock
-      .split("\n")
-      .map(l => l.replace(/^[-*]\s*/, "").trim())
-      .filter(l => l.length > 0);
-    const card = addTask(taskTitle, taskTitle, acceptance.length > 0 ? acceptance : ["GAN critic passes"]);
-    console.log(`\n  ✓ Task added to backlog: ${card.id}\n`);
-  } else {
-    console.log(`\n  Task not added.\n`);
-  }
-}
-
-function scanProjectForIntake(cwd: string): string {
-  const lines: string[] = [];
-  try {
-    const entries = readdirSync(cwd).filter(f => !f.startsWith(".") && f !== "node_modules" && f !== "dist" && f !== "target");
-    for (const entry of entries.slice(0, 30)) {
-      const full = join(cwd, entry);
-      try {
-        const stat = statSync(full);
-        lines.push(stat.isDirectory() ? `  ${entry}/` : `  ${entry}`);
-      } catch {}
-    }
-  } catch {}
-
-  let pkgInfo = "";
-  const pkgPath = join(cwd, "package.json");
-  if (existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-      pkgInfo = `\npackage.json: ${pkg.name ?? "?"} v${pkg.version ?? "?"} — ${pkg.description ?? ""}`.trim();
-    } catch {}
-  }
-
-  return `Files:\n${lines.join("\n")}${pkgInfo ? "\n\n" + pkgInfo : ""}`;
-}
-
-function listKnowledgeForIntake(serfDir: string, subdir: string): string {
-  const dir = join(serfDir, "knowledge", subdir);
-  if (!existsSync(dir)) return "none";
-  try {
-    const files = readdirSync(dir).filter(f => f.endsWith(".md")).slice(-5);
-    if (files.length === 0) return "none";
-    return files.map(f => `- ${f.replace(/\.md$/, "")}`).join("\n");
-  } catch { return "none"; }
-}
-
-function listBoardCardsForIntake(serfDir: string): string {
-  const cols = ["backlog", "in-progress", "review", "done"];
-  const lines: string[] = [];
-  for (const col of cols) {
-    const dir = join(serfDir, "board", col);
-    if (!existsSync(dir)) continue;
-    try {
-      const files = readdirSync(dir).filter(f => f.endsWith(".md"));
-      if (files.length > 0) {
-        lines.push(`${col} (${files.length}): ${files.map(f => f.replace(/\.md$/, "")).join(", ")}`);
-      }
-    } catch {}
-  }
-  return lines.length > 0 ? lines.join("\n") : "empty";
-}
-
-export { readCard, moveCard, listCards, writeCard, type Card };
+export { readCard, moveCard, listCards, writeCard, addTask, type Card };
 export { createSerf, readSerf, listSerfs, type SerfIdentity };
 export { critique, classifyVerdict, type CriticVerdict };
 export { critiqueMultipass, classifyMultipass, type MultiPassVerdict, type Effort, EFFORT_PASSES };
 export { callLLM, BudgetTracker };
-export { spawnAgent, buildAgentPrompt, buildCriticAgentPrompt, buildCriticFollowupPrompt, buildCriticResolvePrompt };
+export { spawnAgent, buildAgentPrompt, buildMasterPrompt, buildCriticAgentPrompt, buildCriticFollowupPrompt, buildCriticResolvePrompt };
 export { HerdrAgent };
