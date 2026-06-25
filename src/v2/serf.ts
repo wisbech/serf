@@ -1,10 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getSerfDir, ensureDir } from "./paths";
 
-const SERF_DIR = join(process.cwd(), ".serf");
-const SERFS_DIR = join(SERF_DIR, "serfs");
-const RETIRED_DIR = join(SERF_DIR, "knowledge", "retired");
+function serfsDir(): string { return join(getSerfDir(), "serfs"); }
+function retiredDir(): string { return join(getSerfDir(), "knowledge", "retired"); }
 
 export interface SerfIdentity {
   name: string;
@@ -14,19 +13,21 @@ export interface SerfIdentity {
   measurement: string[];
   fate: string;
   model?: string;
+  editor?: string;
+  prefs?: Record<string, string>;
 }
 
 function ensureDirs(): void {
-  if (!existsSync(SERFS_DIR)) mkdirSync(SERFS_DIR, { recursive: true });
-  if (!existsSync(RETIRED_DIR)) mkdirSync(RETIRED_DIR, { recursive: true });
+  ensureDir(serfsDir());
+  ensureDir(retiredDir());
 }
 
 function serfPath(name: string): string {
-  return join(SERFS_DIR, `${name}.md`);
+  return join(serfsDir(), `${name}.md`);
 }
 
 function retiredPath(name: string): string {
-  return join(RETIRED_DIR, `${name}.md`);
+  return join(retiredDir(), `${name}.md`);
 }
 
 export function createSerf(identity: SerfIdentity): void {
@@ -43,7 +44,7 @@ export function readSerf(name: string): SerfIdentity | null {
 
 export function listSerfs(): SerfIdentity[] {
   ensureDirs();
-  return readdirSync(SERFS_DIR)
+  return readdirSync(serfsDir())
     .filter(f => f.endsWith(".md"))
     .map(f => readSerf(f.replace(/\.md$/, "")))
     .filter(Boolean) as SerfIdentity[];
@@ -83,10 +84,12 @@ export const MASTER_IDENTITY: SerfIdentity = {
   ],
   fate: "Always running. If I fail 3 times on a task, the task description is bad. If serfs keep dying, my strategy is bad. The user is my final critic.",
   model: undefined,
+  editor: undefined,
+  prefs: undefined,
 };
 
 function identityToMarkdown(identity: SerfIdentity): string {
-  return `# ${identity.name}
+  let md = `# ${identity.name}
 
 ## Mission
 ${identity.mission}
@@ -102,8 +105,13 @@ ${identity.measurement.map(m => `- ${m}`).join("\n")}
 
 ## Fate
 ${identity.fate}
-${identity.model ? `\n## Model\n${identity.model}` : ""}
 `;
+  if (identity.model) md += `\n## Model\n${identity.model}\n`;
+  if (identity.editor) md += `\n## Editor\n${identity.editor}\n`;
+  if (identity.prefs && Object.keys(identity.prefs).length > 0) {
+    md += `\n## Prefs\n${Object.entries(identity.prefs).map(([k, v]) => `- ${k}: ${v}`).join("\n")}\n`;
+  }
+  return md;
 }
 
 function markdownToIdentity(raw: string, name: string): SerfIdentity {
@@ -113,6 +121,18 @@ function markdownToIdentity(raw: string, name: string): SerfIdentity {
   const measurementMatch = raw.match(/## Measurement\n([\s\S]*?)(?=\n## )/m);
   const fateMatch = raw.match(/## Fate\n([\s\S]*?)(?=\n## |$)/m);
   const modelMatch = raw.match(/## Model\n(.+)/m);
+  const editorMatch = raw.match(/## Editor\n(.+)/m);
+  const prefsMatch = raw.match(/## Prefs\n([\s\S]*)/);
+
+  let prefs: Record<string, string> | undefined;
+  if (prefsMatch) {
+    prefs = {};
+    for (const line of prefsMatch[1].split("\n")) {
+      const m = line.match(/^-\s*(.+?):\s*(.+)/);
+      if (m) prefs[m[1].trim()] = m[2].trim();
+    }
+    if (Object.keys(prefs).length === 0) prefs = undefined;
+  }
 
   return {
     name,
@@ -122,5 +142,7 @@ function markdownToIdentity(raw: string, name: string): SerfIdentity {
     measurement: measurementMatch ? measurementMatch[1].split("\n").map(l => l.replace(/^-\s*/, "").trim()).filter(Boolean) : [],
     fate: fateMatch?.[1]?.trim() ?? "",
     model: modelMatch?.[1]?.trim() || undefined,
+    editor: editorMatch?.[1]?.trim() || undefined,
+    prefs,
   };
 }

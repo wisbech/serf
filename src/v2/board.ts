@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getSerfDir, ensureDir } from "./paths";
 
-const SERF_DIR = join(process.cwd(), ".serf");
-const BOARD_DIR = join(SERF_DIR, "board");
+function serfDir(): string { return getSerfDir(); }
+function boardDir(): string { return join(serfDir(), "board"); }
 
 export type Column = "backlog" | "in-progress" | "review" | "done";
 
@@ -26,9 +26,9 @@ export interface Card {
 }
 
 function ensureBoard(): void {
-  if (!existsSync(SERF_DIR)) mkdirSync(SERF_DIR, { recursive: true });
+  ensureDir(serfDir());
   for (const col of COLUMNS) {
-    const dir = join(BOARD_DIR, col);
+    const dir = join(boardDir(), col);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
 }
@@ -38,7 +38,7 @@ function slugify(text: string): string {
 }
 
 function cardPath(id: string, column: Column): string {
-  return join(BOARD_DIR, column, `${id}.md`);
+  return join(boardDir(), column, `${id}.md`);
 }
 
 function findCardColumn(id: string): Column | null {
@@ -104,7 +104,7 @@ export function listCards(column?: Column): Card[] {
   const cards: Card[] = [];
 
   for (const col of cols) {
-    const dir = join(BOARD_DIR, col);
+    const dir = join(boardDir(), col);
     if (!existsSync(dir)) continue;
     for (const file of readdirSync(dir).filter(f => f.endsWith(".md"))) {
       const id = file.replace(/\.md$/, "");

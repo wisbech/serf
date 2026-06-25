@@ -8,7 +8,7 @@
   },
   "main": "dist/index.js",
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm --banner '#!/usr/bin/env bun' && chmod +x dist/index.js",
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm && chmod +x dist/index.js",
     "test": "bun test tests/",
     "start": "bun run src/index.ts",
     "health": "bun run scripts/health-check.ts",

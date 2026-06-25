@@ -1,17 +1,26 @@
 import { callLLM, BudgetTracker } from "./llm";
-import { critique, isPass, isHighConfidenceFail, type CriticVerdict } from "./critic";
-import { addTask, readCard, moveCard, writeCard, listCards, type Card } from "./board";
-import { readSerf, listSerfs, createSerf, morphSerf, MASTER_IDENTITY, type SerfIdentity } from "./serf";
+import { critique, classifyVerdict, parseVerdict, type CriticVerdict } from "./critic";
+import { critiqueMultipass, classifyMultipass, type MultiPassVerdict, type Effort, type CuriosityPoint, EFFORT_PASSES, type CritiqueFn } from "./critic_multipass";
+import { readCard, moveCard, writeCard, listCards, type Card } from "./board";
+import { readSerf, listSerfs, createSerf, type SerfIdentity } from "./serf";
 import { appendEvent } from "./events";
 import * as herdr from "./herdr";
+import { HerdrAgent } from "./herdr";
+import { spawnAgent, buildAgentPrompt, buildCriticAgentPrompt, buildCriticFollowupPrompt, buildCriticResolvePrompt } from "./executor";
+import { getSerfDir, ensureDir } from "./paths";
 import { loadConfig } from "../state";
+import { join } from "node:path";
+import { existsSync, readFileSync, writeFileSync, watch, execSync, symlinkSync, rmSync } from "node:fs";
 
 const MAX_RETRIES = 3;
+const AGREEMENT_THRESHOLD = 0.7;
+const spawnedSerfs: HerdrAgent[] = [];
 
 export interface MasterOptions {
   budgetLimit?: number;
   model?: string;
   useHerdr?: boolean;
+  once?: boolean;
 }
 
 export async function startMaster(options: MasterOptions = {}): Promise<void> {
@@ -26,103 +35,163 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
   const herdrRunning = herdr.isHerdrRunning();
   const useHerdr = options.useHerdr ?? herdrRunning;
 
-  if (useHerdr && !herdrRunning) {
-    console.log("\n  ⚠ herdr socket not found. Falling back to direct LLM mode.\n");
+  console.log("\n  ═══ SERF DARK FACTORY ═══════════════════════");
+  console.log(`  ${useHerdr ? "herdr mode" : "direct mode"} | agent: ${loadConfig()?.agent ?? "claude"} | model: ${options.model ?? loadConfig()?.model ?? "default"}`);
+  console.log("  Loop running. Ctrl+C to stop.\n");
+
+  let harness: HerdrHarness | null = null;
+  if (useHerdr) {
+    harness = await HerdrHarness.create(options.model);
   }
 
-  if (useHerdr && herdrRunning) {
-    console.log("  (herdr detected — will spawn panes for executor + critic)");
-  } else {
-    console.log("  (direct LLM mode — no herdr)");
-  }
+  // Event-driven loop — no polling
+  while (true) {
+    const cards = [...listCards("in-progress"), ...listCards("backlog")];
 
-  const inProgress = listCards("in-progress");
-  const backlog = listCards("backlog");
+    if (cards.length === 0) {
+      if (options.once) {
+        console.log("\n  Board empty. Done.\n");
+        break;
+      }
 
-  if (inProgress.length === 0 && backlog.length === 0) {
-    console.log("\n  No tasks on the board. Add one with: serf task \"do something\"\n");
-    return;
-  }
+      // Wait for new cards via filesystem events — no polling
+      console.log(`  Board empty. Waiting for tasks... (serf task "do something")`);
+      await waitForNewCards();
+      continue;
+    }
 
-  const cards = [...inProgress, ...backlog];
-
-  for (const card of cards) {
     if (budget.isOverBudget()) {
-      console.log("\n  ⚠ Budget exceeded. Remaining tasks deferred.\n");
+      console.log("\n  ⚠ Budget exceeded. Stopping.\n");
       break;
     }
-    await processCard(card, budget, options.model, useHerdr && herdrRunning);
+
+    // Process all ready cards
+    for (const card of cards) {
+      if (budget.isOverBudget()) break;
+      await processCard(card, budget, options.model, useHerdr && herdrRunning, harness);
+    }
+
+    if (options.once) break;
+    // Loop immediately — check for new cards (the actor may have written subtasks)
   }
+
+  if (harness) await harness.close();
 }
 
-async function processCard(card: Card, budget: BudgetTracker, model?: string, useHerdr = false): Promise<void> {
+// Event-driven wait — watches the backlog directory for new .md files
+function waitForNewCards(): Promise<void> {
+  return new Promise((resolve) => {
+    const serfDir = getSerfDir();
+    const backlogDir = join(serfDir, "board", "backlog");
+    ensureDir(backlogDir);
+
+    const watcher = watch(backlogDir, (eventType, filename) => {
+      if (filename && filename.endsWith(".md")) {
+        watcher.close();
+        resolve();
+      }
+    });
+
+    // Also watch in-progress (resumed tasks)
+    const inProgressDir = join(serfDir, "board", "in-progress");
+    const watcher2 = watch(inProgressDir, (eventType, filename) => {
+      if (filename && filename.endsWith(".md")) {
+        watcher.close();
+        watcher2.close();
+        resolve();
+      }
+    });
+
+    // Safety timeout — if watcher fails, wake up after 60s
+    setTimeout(() => {
+      watcher.close();
+      watcher2.close();
+      resolve();
+    }, 60_000);
+  });
+}
+
+async function processCard(card: Card, budget: BudgetTracker, model?: string, useHerdr = false, harness?: HerdrHarness | null): Promise<void> {
   console.log(`\n  ▶ ${card.title}`);
 
   moveCard(card.id, "in-progress");
   appendEvent("task.started", { card: card.id, title: card.title });
 
-  let herdrMode = useHerdr;
+  const worktreePath = createWorktree(card);
+  if (worktreePath) {
+    console.log(`    → worktree: ${worktreePath.split("/").slice(-2).join("/")}`);
+  }
 
-  if (herdrMode) {
+  let result: "done" | "review" = "review";
+
+  if (useHerdr && harness) {
     try {
-      await processWithHerdr(card, budget, model);
-      return;
+      result = await processWithHerdr(card, budget, harness);
     } catch (err) {
-      console.log(`  ⚠ herdr mode failed: ${err instanceof Error ? err.message : String(err)}`);
-      console.log(`  Falling back to direct LLM mode.\n`);
-      herdrMode = false;
+      console.log(`  ⚠ herdr failed: ${err instanceof Error ? err.message : String(err)}`);
+      moveCard(card.id, "review");
+      appendEvent("task.failed", { card: card.id, reason: "herdr-error" });
     }
+  } else {
+    result = await processDirect(card, budget, model);
   }
 
-  if (!herdrMode) {
-    await processWithLLM(card, budget, model);
+  if (worktreePath) {
+    removeWorktree(card, result === "done");
+    console.log(`    → worktree ${result === "done" ? "merged" : "discarded"}`);
   }
 }
 
-async function processWithHerdr(card: Card, budget: BudgetTracker, model?: string): Promise<void> {
-  const config = loadConfig();
-  const agentModel = model || config?.model || "qwen3.5";
-  const transport = config?.transport || "ollama";
+// ── HERDR HARNESS ──
 
-  // Create a workspace for this task
-  const ws = await herdr.createWorkspace(card.title.slice(0, 40), process.cwd());
-  console.log(`  → herdr workspace: ${ws.workspace_id}`);
+class HerdrHarness {
+  workspaceId: string;
+  actor: HerdrAgent;
+  critic: HerdrAgent | null;
 
-  // Determine which agent command to run in panes
-  // For ollama: use `ollama run <model>` and pipe the prompt
-  // For pi: use `pi --model <model>`
-  // For claude: use `claude --model <model>`
-  let agentCmd: string;
-  let agentArgs: string[];
-  if (transport === "ollama") {
-    agentCmd = "ollama";
-    agentArgs = ["run", agentModel];
-  } else if (transport === "pi") {
-    agentCmd = "pi";
-    agentArgs = ["--model", agentModel, "--no-skills", "--no-extensions"];
-  } else if (transport === "claude") {
-    agentCmd = "claude";
-    agentArgs = ["--model", agentModel];
-  } else {
-    agentCmd = transport;
-    agentArgs = ["--model", agentModel];
+  private constructor(workspaceId: string, actor: HerdrAgent, critic: HerdrAgent | null) {
+    this.workspaceId = workspaceId;
+    this.actor = actor;
+    this.critic = critic;
   }
 
-  // Start executor agent in a pane
-  const executorPane = await herdr.startAgent("executor", agentCmd, agentArgs, {
-    workspaceId: ws.workspace_id,
-    cwd: process.cwd(),
-    split: "right",
-  });
-  console.log(`  → executor pane: ${executorPane.pane_id} (${agentCmd} ${agentArgs.join(" ")})`);
+  static async create(model?: string): Promise<HerdrHarness> {
+    const config = loadConfig();
+    const agentName = config?.agent ?? "claude";
+    const agentModel = model || config?.model;
+    const criticAgentName = config?.criticAgent ?? agentName;
+    const criticModel = config?.criticModel ?? agentModel;
 
-  // Start critic agent in a pane — same model, different role
-  const criticPane = await herdr.startAgent("critic", agentCmd, agentArgs, {
-    workspaceId: ws.workspace_id,
-    cwd: process.cwd(),
-    split: "down",
-  });
-  console.log(`  → critic pane: ${criticPane.pane_id}`);
+    const ws = await herdr.createWorkspace("serf-harness", process.cwd());
+    console.log(`  → herdr workspace: ${ws.workspace_id}`);
+
+    const rootPaneId = ws.workspace_id + ":p1";
+    await herdr.sendCommand(rootPaneId, `echo "╔══ SERF ACTOR (${agentName}) ══╗"`);
+    await herdr.sendCommand(rootPaneId, herdr.buildAgentCmd(agentName, agentModel));
+    await new Promise(r => setTimeout(r, 5000));
+    const actor = HerdrAgent.fromExisting(rootPaneId, "actor", agentName, agentModel);
+    console.log(`    → Actor ready (${agentName})`);
+
+    let critic: HerdrAgent | null = null;
+    try {
+      critic = await HerdrAgent.create(ws.workspace_id, "critic", criticAgentName, criticModel, "right");
+      console.log(`    → Critic ready (${criticAgentName})`);
+    } catch (err) {
+      console.log(`    ⚠ Critic pane unavailable: ${err instanceof Error ? err.message : String(err)}. Using inline critic.`);
+    }
+
+    return new HerdrHarness(ws.workspace_id, actor, critic);
+  }
+
+  async close(): Promise<void> {
+    if (this.critic) await this.critic.close();
+  }
+}
+
+// ── HERDR MODE ──
+
+async function processWithHerdr(card: Card, budget: BudgetTracker, harness: HerdrHarness): Promise<"done" | "review"> {
+  const { actor, critic, workspaceId } = harness;
 
   let attempt = 0;
   let lastFeedback = "";
@@ -130,164 +199,333 @@ async function processWithHerdr(card: Card, budget: BudgetTracker, model?: strin
   while (attempt < MAX_RETRIES) {
     attempt++;
 
-    const executorPrompt = buildExecutionPrompt(card, lastFeedback, attempt);
+    const prompt = buildAgentPrompt(card, { name: "actor", mission: "", persona: "", lever: [], measurement: [], fate: "" }, lastFeedback, attempt);
 
-    // Send the task to the executor pane
-    await herdr.reportAgentState(executorPane.pane_id, "executor", "working", `attempt ${attempt}`);
-    await herdr.sendInput(executorPane.pane_id, executorPrompt);
-    console.log(`    → Sent task to executor (attempt ${attempt})`);
+    await actor.send(prompt);
+    console.log(`    → Attempt ${attempt}: actor working...`);
 
-    // Wait for the executor to finish (check herdr state)
-    const executorState = await herdr.waitForState(executorPane.pane_id, "done", 300_000);
-    console.log(`    → Executor state: ${executorState}`);
+    const output = await actor.waitForDone(600_000);
+    console.log(`    → ${output.length} chars\n`);
 
-    // Read the executor's output from the pane
-    const executorOutput = await herdr.readPane(executorPane.pane_id, 200);
-    console.log(`    → Read ${executorOutput.length} chars from executor`);
+    const { verdict: mpv } = await critiqueWithHerdr(card, output, critic, actor, attempt);
+    printMultipassCritic(mpv);
 
-    // Send the output to the critic pane for evaluation
-    const criticPrompt = `Evaluate this response to a task.\n\nTASK: ${card.task}\n\nRESPONSE: ${executorOutput.slice(0, 3000)}\n\nRespond with:\nVERDICT: pass | fail\nCONFIDENCE: 0.0 to 1.0\nISSUES: comma-separated (or "none")\nREASONING: one sentence`;
+    appendEvent("critic.verdict", {
+      card: card.id, attempt,
+      verdict: mpv.finalVerdict,
+      agreementRate: mpv.agreementRate,
+      curiosity: mpv.curiosity,
+      passes: mpv.totalPasses,
+      curiosityPoints: mpv.curiosityPoints.length,
+      criticMode: critic ? "agent-pane" : "inline-llm",
+    });
 
-    await herdr.reportAgentState(criticPane.pane_id, "critic", "working", "evaluating");
-    await herdr.sendInput(criticPane.pane_id, criticPrompt);
+    const outcome = classifyMultipass(mpv, AGREEMENT_THRESHOLD);
 
-    // Wait for critic to finish
-    const criticState = await herdr.waitForState(criticPane.pane_id, "done", 120_000);
-    const criticOutput = await herdr.readPane(criticPane.pane_id, 50);
-
-    // Parse the critic's verdict from the pane output
-    const verdict = parseVerdictFromPane(criticOutput);
-    console.log(`    Critic: ${verdict.verdict} (${verdict.confidence.toFixed(2)}) ${verdict.issues.length > 0 ? verdict.issues.join(", ") : ""}`);
-
-    await herdr.reportAgentState(criticPane.pane_id, "critic", "done", verdict.verdict);
-
-    if (isPass(verdict)) {
-      const quality = verdict.verdict === "pass" ? verdict.confidence : 0.5;
-      finishCard(card, executorOutput, quality, budget);
-      appendEvent("task.completed", { card: card.id, quality, attempt });
-      console.log(`    ✓ Completed (quality: ${(quality * 100).toFixed(0)}%)\n`);
-      console.log(`  → Output visible in herdr pane: ${executorPane.pane_id}`);
-      console.log(`  → Critic verdict in herdr pane: ${criticPane.pane_id}`);
-      return;
+    if (outcome === "pass") {
+      finishCard(card, output, mpv.agreementRate, budget);
+      appendEvent("task.completed", { card: card.id, quality: mpv.agreementRate, attempt });
+      console.log(`    ✓ Completed (agreement ${(mpv.agreementRate * 100).toFixed(0)}%)\n`);
+      return "done";
     }
 
-    lastFeedback = `Previous attempt rejected. Issues: ${verdict.issues.join(", ")}. ${verdict.reasoning}`;
-    appendEvent("task.retry", { card: card.id, attempt, issues: verdict.issues });
+    if (outcome === "curiosity") {
+      logCuriosityPoints(card, mpv);
+      lastFeedback = `Uncertain. Critic disagreement: ${(mpv.curiosity * 100).toFixed(0)}%. Issues: ${mpv.issues.join(", ")}. ${mpv.reasoning}`;
+      appendEvent("task.curiosity", { card: card.id, attempt, curiosity: mpv.curiosity, points: mpv.curiosityPoints.map(p => p.criterion) });
+      console.log(`    ~ Curiosity ${(mpv.curiosity * 100).toFixed(0)}%. Logged to knowledge. Retrying.\n`);
+    } else {
+      lastFeedback = `Rejected. Issues: ${mpv.issues.join(", ")}. ${mpv.reasoning}`;
+      appendEvent("task.retry", { card: card.id, attempt, issues: mpv.issues });
+    }
+
+    if (attempt === 2) await maybeSpawnSerf(card, mpv, workspaceId);
   }
 
-  await herdr.reportAgentState(executorPane.pane_id, "executor", "done", "failed");
+  console.log(`    ✗ Failed ${MAX_RETRIES}x. Moved to review.`);
   moveCard(card.id, "review");
   appendEvent("task.failed", { card: card.id, reason: "max-retries", attempts: attempt });
-  console.log(`    ✗ Failed after ${MAX_RETRIES} attempts. Card moved to review.\n`);
-  console.log(`  → Review output in herdr panes: ${executorPane.pane_id}, ${criticPane.pane_id}`);
+  return "review";
 }
 
-function parseVerdictFromPane(text: string): CriticVerdict {
-  const verdictMatch = text.match(/VERDICT:\s*(pass|fail)/i);
-  const confidenceMatch = text.match(/CONFIDENCE:\s*([\d.]+)/i);
-  const issuesMatch = text.match(/ISSUES:\s*(.+)/i);
-  const reasoningMatch = text.match(/REASONING:\s*(.+)/i);
+// ── HERDR CRITIC ──
 
-  return {
-    verdict: (verdictMatch?.[1]?.toLowerCase() ?? "fail") as "pass" | "fail",
-    confidence: confidenceMatch ? parseFloat(confidenceMatch[1]) : 0.5,
-    issues: issuesMatch ? issuesMatch[1].split(",").map(s => s.trim()).filter(s => s !== "none" && s.length > 0) : [],
-    reasoning: reasoningMatch?.[1]?.trim() ?? "",
+const MAX_DIALOGUE_ROUNDS = 3;
+
+async function critiqueWithHerdr(
+  card: Card,
+  output: string,
+  critic: HerdrAgent | null,
+  actor: HerdrAgent,
+  attempt: number,
+): Promise<{ verdict: MultiPassVerdict; results: any[] }> {
+  if (!critic) {
+    return critiqueMultipass(card.task, output, card.acceptance);
+  }
+
+  const criticPrompt = buildCriticAgentPrompt(card, output, attempt);
+  await critic.send(criticPrompt);
+  console.log(`    → Critic evaluating...`);
+
+  let criticOutput = await critic.waitForDone(600_000);
+  let criticVerdict = parseVerdict(criticOutput);
+
+  appendEvent("critic.pane.verdict", {
+    card: card.id, attempt, round: 0,
+    verdict: criticVerdict.verdict,
+    confidence: criticVerdict.confidence,
+    issues: criticVerdict.issues,
+  });
+
+  let dialogueRound = 0;
+  while (criticVerdict.verdict === "uncertain" && dialogueRound < MAX_DIALOGUE_ROUNDS) {
+    dialogueRound++;
+    const criticQuestion = extractCriticQuestion(criticOutput);
+
+    if (!criticQuestion) {
+      console.log(`    ~ Critic uncertain, no question asked. Bubbling to user.`);
+      break;
+    }
+
+    console.log(`    → Critic asks actor (round ${dialogueRound}): ${criticQuestion.slice(0, 80)}...`);
+
+    const followupPrompt = buildCriticFollowupPrompt(criticQuestion);
+    const actorResponse = await actor.ask(followupPrompt, 300_000);
+    console.log(`    → Actor responded (${actorResponse.length} chars)`);
+
+    appendEvent("critic.dialogue", {
+      card: card.id, attempt, round: dialogueRound,
+      question: criticQuestion.slice(0, 200),
+      responseLength: actorResponse.length,
+    });
+
+    const resolvePrompt = buildCriticResolvePrompt(actorResponse);
+    criticOutput = await critic.ask(resolvePrompt, 300_000);
+    criticVerdict = parseVerdict(criticOutput);
+
+    appendEvent("critic.pane.verdict", {
+      card: card.id, attempt, round: dialogueRound,
+      verdict: criticVerdict.verdict,
+      confidence: criticVerdict.confidence,
+      issues: criticVerdict.issues,
+    });
+
+    console.log(`    → Critic resolved: ${criticVerdict.verdict} (${(criticVerdict.confidence * 100).toFixed(0)}%)`);
+  }
+
+  const curiosityNotes = criticVerdict.curiosity ?? [];
+  const mpv: MultiPassVerdict = {
+    finalVerdict: criticVerdict.verdict,
+    agreementRate: criticVerdict.confidence > 0.7 ? criticVerdict.confidence : 0.5,
+    curiosity: criticVerdict.verdict === "uncertain" ? 0.5 : 0,
+    passCount: criticVerdict.verdict === "pass" ? 1 : 0,
+    failCount: criticVerdict.verdict === "fail" ? 1 : 0,
+    uncertainCount: criticVerdict.verdict === "uncertain" ? 1 : 0,
+    totalPasses: 1,
+    effort: "quick",
+    verdicts: [criticVerdict],
+    curiosityPoints: [],
+    curiosityNotes,
+    issues: criticVerdict.issues,
+    reasoning: criticVerdict.reasoning,
+    evidence: criticVerdict.evidence,
   };
+
+  return { verdict: mpv, results: [] };
 }
 
-async function processWithLLM(card: Card, budget: BudgetTracker, model?: string): Promise<void> {
+function extractCriticQuestion(criticOutput: string): string | null {
+  // Try to find a question in the critic's output
+  // Look for lines ending with ? or explicitly marked questions
+  const lines = criticOutput.split("\n");
+  const questions: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.endsWith("?") && trimmed.length > 10) {
+      questions.push(trimmed);
+    }
+  }
+
+  // Also look for "QUESTION:" prefix
+  const questionMatch = criticOutput.match(/QUESTION:\s*(.+?)(?:\n|$)/i);
+  if (questionMatch) {
+    return questionMatch[1].trim();
+  }
+
+  // Return the first question found, or null
+  return questions.length > 0 ? questions[0] : null;
+}
+
+function extractCuriosityFromVerdict(v: CriticVerdict): CuriosityPoint[] {
+  if (!v.criterionAnswers) return [];
+  return v.criterionAnswers
+    .filter(a => a.answer === "CANNOT_EVALUATE")
+    .map(a => ({
+      criterion: a.criterion,
+      agreement: 0,
+      answers: [a.answer] as ("YES" | "NO" | "CANNOT_EVALUATE")[],
+    }));
+}
+
+// ── DIRECT MODE ──
+
+async function processDirect(card: Card, budget: BudgetTracker, model?: string): Promise<"done" | "review"> {
+  const config = loadConfig();
+  const agentName = config?.agent ?? "claude";
+  console.log(`  → agent: ${agentName}`);
+
   let attempt = 0;
-  let lastVerdict: CriticVerdict | null = null;
   let lastFeedback = "";
 
   while (attempt < MAX_RETRIES) {
     attempt++;
 
-    const prompt = buildExecutionPrompt(card, lastFeedback, attempt);
-    const systemPrompt = buildMasterSystemPrompt();
+    const prompt = buildAgentPrompt(card, { name: "actor", mission: "", persona: "", lever: [], measurement: [], fate: "" }, lastFeedback, attempt);
 
-    const result = await callLLM(prompt, { systemPrompt, budgetTracker: budget, model });
+    console.log(`    → Spawning ${agentName} (attempt ${attempt})...`);
+    const execResult = await spawnAgent(prompt, {
+      cwd: process.cwd(),
+      timeoutMs: 600_000,
+      agent: agentName,
+      model: model || config?.model,
+    });
 
-    if (!result.ok) {
-      console.log(`    ⚠ LLM failed: ${result.warnings.join(", ")}`);
-      if (result.warnings.includes("budget-exceeded")) break;
+    if (!execResult.ok) {
+      console.log(`    ⚠ ${execResult.warnings.join(", ")}`);
+      lastFeedback = "No output produced. Complete the task.";
       continue;
     }
 
-    if (result.warnings.includes("possible-gibberish")) {
-      console.log(`    ⚠ Possible gibberish on attempt ${attempt}`);
-      lastFeedback = "Previous output was gibberish. Produce clean output.";
-      continue;
+    console.log(`    → ${execResult.output.length} chars\n`);
+
+    const { verdict: mpv } = await critiqueMultipass(card.task, execResult.output, card.acceptance);
+    printMultipassCritic(mpv);
+
+    appendEvent("critic.verdict", {
+      card: card.id, attempt,
+      verdict: mpv.finalVerdict,
+      agreementRate: mpv.agreementRate,
+      curiosity: mpv.curiosity,
+      passes: mpv.totalPasses,
+      curiosityPoints: mpv.curiosityPoints.length,
+    });
+
+    const outcome = classifyMultipass(mpv, AGREEMENT_THRESHOLD);
+
+    if (outcome === "pass") {
+      finishCard(card, execResult.output, mpv.agreementRate, budget);
+      appendEvent("task.completed", { card: card.id, quality: mpv.agreementRate, attempt, agent: execResult.agent });
+      console.log(`    ✓ Completed (agreement ${(mpv.agreementRate * 100).toFixed(0)}%)\n`);
+      return "done";
     }
 
-    console.log(`    → Attempt ${attempt}: ${result.tokensUsed} tokens`);
-
-    const { verdict } = await critique(card.task, result.text, card.acceptance);
-    lastVerdict = verdict;
-
-    console.log(`    Critic: ${verdict.verdict} (${verdict.confidence.toFixed(2)}) ${verdict.issues.length > 0 ? verdict.issues.join(", ") : ""}`);
-
-    if (isPass(verdict)) {
-      const quality = verdict.verdict === "pass" ? verdict.confidence : 0.5;
-      finishCard(card, result.text, quality, budget);
-      appendEvent("task.completed", { card: card.id, quality, attempt, tokens: result.tokensUsed });
-      console.log(`    ✓ Completed (quality: ${(quality * 100).toFixed(0)}%)\n`);
-      return;
+    if (outcome === "curiosity") {
+      logCuriosityPoints(card, mpv);
+      lastFeedback = `Uncertain. Critic disagreement: ${(mpv.curiosity * 100).toFixed(0)}%. Issues: ${mpv.issues.join(", ")}. ${mpv.reasoning}`;
+      appendEvent("task.curiosity", { card: card.id, attempt, curiosity: mpv.curiosity, points: mpv.curiosityPoints.map(p => p.criterion) });
+      console.log(`    ~ Curiosity ${(mpv.curiosity * 100).toFixed(0)}%. Logged to knowledge. Retrying.\n`);
+    } else {
+      lastFeedback = `Rejected. Issues: ${mpv.issues.join(", ")}. ${mpv.reasoning}`;
+      appendEvent("task.retry", { card: card.id, attempt, issues: mpv.issues });
     }
 
-    lastFeedback = `Previous attempt rejected. Issues: ${verdict.issues.join(", ")}. ${verdict.reasoning}`;
-    appendEvent("task.retry", { card: card.id, attempt, issues: verdict.issues });
+    if (attempt === 2) await maybeSpawnSerf(card, mpv);
   }
 
-  if (lastVerdict && isHighConfidenceFail(lastVerdict)) {
-    console.log(`    ✗ Failed after ${MAX_RETRIES} attempts. The task description may be bad.`);
-  } else {
-    console.log(`    ~ Low confidence. Moved to review.`);
-  }
+  console.log(`    ✗ Failed ${MAX_RETRIES}x. Moved to review.`);
   moveCard(card.id, "review");
   appendEvent("task.failed", { card: card.id, reason: "max-retries", attempts: attempt });
+  return "review";
 }
 
-function buildMasterSystemPrompt(): string {
-  const serfs = listSerfs();
-  const serfList = serfs.map(s => `- ${s.name}: ${s.mission}`).join("\n");
+// ── SPAWN FROM FRICTION ──
 
-  return `You are the Master Serf. You coordinate a dark factory.
+async function maybeSpawnSerf(card: Card, mpv: MultiPassVerdict, workspaceId?: string): Promise<void> {
+  if (mpv.finalVerdict !== "fail" || mpv.issues.length === 0) return;
 
-Your job: receive a task, execute it by morphing your persona, and produce quality output.
+  const result = await callLLM(`The actor failed twice. Critic issues: ${mpv.issues.join(", ")}.
+Reasoning: ${mpv.reasoning}
+Task: ${card.task}
 
-You can morph your approach based on the task:
-- Research task → be skeptical, cite sources, verify claims
-- Writing task → be clear, structured, concise
-- Analysis task → be thorough, show reasoning, consider alternatives
-- Design task → be concrete, propose mechanisms, show how it works
+What specialized serf should handle this? Respond with:
+NAME: <one-word>
+MISSION: <one sentence>
+PERSONA: <one sentence>`);
 
-Available serfs for reference:
-${serfList}
+  const nameMatch = result.text.match(/NAME:\s*(\S+)/i);
+  const missionMatch = result.text.match(/MISSION:\s*(.+)/i);
+  const personaMatch = result.text.match(/PERSONA:\s*(.+)/i);
+  if (!nameMatch || !missionMatch) return;
 
-Rules:
-- Respond directly with your work. No preamble.
-- If you don't know something, say so. Don't hallucinate.
-- Quality matters more than length. Be complete but not verbose.
-- The GAN critic will review your output. If it fails, you retry with feedback.
-- If you fail 3 times, the task description is bad, not you.`;
+  const name = nameMatch[1].toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!name || readSerf(name)) return;
+
+  createSerf({
+    name,
+    mission: missionMatch[1].trim(),
+    persona: personaMatch?.[1]?.trim() ?? "Spawned from friction.",
+    lever: [".serf/ folder", "file system"],
+    measurement: [`Pass rate on ${name} tasks: >70%`],
+    fate: `Spawned because actor couldn't handle: ${mpv.issues.join(", ")}.`,
+  });
+
+  appendEvent("serf.spawned", { name, mission: missionMatch[1].trim(), reason: "friction" });
+  console.log(`    ⚡ Spawned: ${name} — ${missionMatch[1].trim()}`);
+
+  if (workspaceId) {
+    try {
+      const config = loadConfig();
+      const spawned = await HerdrAgent.create(workspaceId, name, config?.agent ?? "claude", config?.model, "down");
+      console.log(`    ⚡ Spawned serf pane ready: ${name}`);
+      spawnedSerfs.push(spawned);
+    } catch (err) {
+      console.log(`    ⚡ Spawned ${name} (no pane — ${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
 }
 
-function buildExecutionPrompt(card: Card, feedback: string, attempt: number): string {
-  let prompt = `TASK:\n${card.task}\n\nACCEPTANCE CRITERIA:\n${card.acceptance.map(a => `- ${a}`).join("\n")}`;
+// ── HELPERS ──
 
-  if (card.context) {
-    prompt += `\n\nCONTEXT (from previous work):\n${card.context}`;
+function printMultipassCritic(mpv: MultiPassVerdict): void {
+  console.log(`    ┌── GAN CRITIC (${mpv.totalPasses} passes) ──────────────────────────`);
+  console.log(`    │ Verdict:    ${mpv.finalVerdict.toUpperCase()}`);
+  console.log(`    │ Agreement: ${(mpv.agreementRate * 100).toFixed(0)}% (${mpv.passCount} pass / ${mpv.failCount} fail${mpv.uncertainCount > 0 ? ` / ${mpv.uncertainCount} uncertain` : ""})`);
+  console.log(`    │ Curiosity: ${(mpv.curiosity * 100).toFixed(0)}%`);
+  if (mpv.issues.length > 0) {
+    console.log(`    │ Issues:    ${mpv.issues.join(", ")}`);
   }
-
-  if (feedback) {
-    prompt += `\n\nFEEDBACK FROM PREVIOUS ATTEMPT:\n${feedback}`;
+  if (mpv.curiosityNotes.length > 0) {
+    console.log(`    │ Curious:   ${mpv.curiosityNotes.slice(0, 3).join("; ")}`);
   }
+  if (mpv.curiosityPoints.length > 0) {
+    console.log(`    │ Points:    ${mpv.curiosityPoints.slice(0, 3).map(p => `${p.criterion.slice(0, 30)} (${(p.agreement * 100).toFixed(0)}%)`).join(", ")}`);
+  }
+  console.log(`    │ Reasoning: ${mpv.reasoning}`);
+  console.log(`    └───────────────────────────────────────────────────\n`);
+}
 
-  prompt += `\n\nProduce your best work. This is attempt ${attempt} of ${MAX_RETRIES}.`;
+function logCuriosityPoints(card: Card, mpv: MultiPassVerdict): void {
+  if (mpv.curiosityPoints.length === 0 && mpv.curiosityNotes.length === 0) return;
+  const serfDir = getSerfDir();
+  const knowledgeDir = join(serfDir, "knowledge", "patterns");
+  ensureDir(knowledgeDir);
 
-  return prompt;
+  const ts = new Date().toISOString();
+  const lines = [`# Curiosity: ${card.title}`, "", `## Date`, ts, "", `## Task`, card.task, "", `## Curiosity Signal`, `Agreement: ${(mpv.agreementRate * 100).toFixed(0)}%`, `Curiosity: ${(mpv.curiosity * 100).toFixed(0)}%`, "", `## Curiosity Notes`];
+  for (const note of mpv.curiosityNotes) {
+    lines.push(`- ${note}`);
+  }
+  if (mpv.curiosityPoints.length > 0) {
+    lines.push("", `## Curiosity Points`);
+    for (const p of mpv.curiosityPoints) {
+      lines.push(`- ${p.criterion} — agreement ${(p.agreement * 100).toFixed(0)}% — answers: ${p.answers.join(", ")}`);
+    }
+  }
+  lines.push("", "## Implication", "The critic is uncertain here. Human judgment is most valuable at this boundary. This pattern signals where the system's model is weak.");
+
+  const filePath = join(knowledgeDir, `curiosity-${card.id}-${ts.replace(/[:.]/g, "-")}.md`);
+  try { writeFileSync(filePath, lines.join("\n") + "\n"); } catch {}
 }
 
 function finishCard(card: Card, output: string, quality: number, budget: BudgetTracker): void {
@@ -301,28 +539,59 @@ function finishCard(card: Card, output: string, quality: number, budget: BudgetT
 }
 
 function ensureSeeded(): void {
-  const { existsSync, mkdirSync, writeFileSync } = require("node:fs");
-  const { join } = require("node:path");
-  const serfDir = join(process.cwd(), ".serf");
-
-  if (!existsSync(serfDir)) mkdirSync(serfDir, { recursive: true });
+  const serfDir = getSerfDir();
+  ensureDir(serfDir);
 
   const planPath = join(serfDir, "plan.md");
   if (!existsSync(planPath)) {
-    writeFileSync(planPath, "# Plan\n\nThe mission and current direction. Edit this to guide the master serf.\n");
+    writeFileSync(planPath, "# Plan\n\nThe mission and current direction.\n");
   }
 
-  for (const dir of ["board/backlog", "board/in-progress", "board/review", "board/done", "serfs", "knowledge", "events"]) {
-    const p = join(serfDir, dir);
-    if (!existsSync(p)) mkdirSync(p, { recursive: true });
-  }
-
-  if (!readSerf("master")) {
-    createSerf(MASTER_IDENTITY);
+  for (const dir of [
+    "board/backlog", "board/in-progress", "board/review", "board/done",
+    "serfs", "knowledge/skills", "knowledge/patterns", "knowledge/failures", "knowledge/references",
+    "events", "worktrees",
+    "workspaces/actor/.serf", "workspaces/critic/.serf", "workspaces/critic/.serf/verdicts",
+  ]) {
+    ensureDir(join(serfDir, dir));
   }
 }
 
-export { addTask, readCard, moveCard, listCards, writeCard, type Card };
-export { createSerf, readSerf, listSerfs, morphSerf, type SerfIdentity };
-export { critique, isPass, isHighConfidenceFail, type CriticVerdict };
+function createWorktree(card: Card): string | null {
+  const serfDir = getSerfDir();
+  const worktreePath = join(serfDir, "worktrees", card.id);
+  try {
+    execSync(`git worktree add "${worktreePath}" HEAD 2>/dev/null`, { stdio: "pipe" });
+    const serfLink = join(worktreePath, ".serf");
+    if (!existsSync(serfLink)) {
+      symlinkSync(serfDir, serfLink);
+    }
+    return worktreePath;
+  } catch {
+    return null;
+  }
+}
+
+function removeWorktree(card: Card, merge: boolean): void {
+  const serfDir = getSerfDir();
+  const worktreePath = join(serfDir, "worktrees", card.id);
+  if (!existsSync(worktreePath)) return;
+
+  if (merge) {
+    try {
+      execSync(`git add -A && git commit -m "serf: ${card.title}" --no-verify`, { cwd: worktreePath, stdio: "pipe" });
+      execSync(`git merge --no-ff ${card.id} --no-edit 2>/dev/null`, { stdio: "pipe" });
+    } catch {}
+  }
+
+  try { execSync(`git worktree remove --force "${worktreePath}"`, { stdio: "pipe" }); } catch {}
+  try { execSync(`git branch -D ${card.id} 2>/dev/null`, { stdio: "pipe" }); } catch {}
+}
+
+export { readCard, moveCard, listCards, writeCard, type Card };
+export { createSerf, readSerf, listSerfs, type SerfIdentity };
+export { critique, classifyVerdict, type CriticVerdict };
+export { critiqueMultipass, classifyMultipass, type MultiPassVerdict, type Effort, EFFORT_PASSES };
 export { callLLM, BudgetTracker };
+export { spawnAgent, buildAgentPrompt, buildCriticAgentPrompt, buildCriticFollowupPrompt, buildCriticResolvePrompt };
+export { HerdrAgent };

@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getSerfDir, ensureDir } from "./paths";
 
-const EVENTS_DIR = join(homedir(), ".serf", "events");
+function eventsDir(): string { return join(getSerfDir(), "events"); }
 
 export interface SerfEvent {
   type: string;
@@ -22,9 +22,10 @@ export function appendEvent(type: string, payload: Record<string, unknown>, subj
     payload,
   };
 
-  if (!existsSync(EVENTS_DIR)) mkdirSync(EVENTS_DIR, { recursive: true });
+  const dir = eventsDir();
+  ensureDir(dir);
   const date = event.ts.slice(0, 10);
-  const file = join(EVENTS_DIR, `${date}.jsonl`);
+  const file = join(dir, `${date}.jsonl`);
 
   try {
     writeFileSync(file, JSON.stringify(event) + "\n", { flag: "a" });
@@ -38,12 +39,13 @@ export function appendEvent(type: string, payload: Record<string, unknown>, subj
 }
 
 export function queryEvents(type?: string, limit?: number): SerfEvent[] {
-  if (!existsSync(EVENTS_DIR)) return [];
+  const dir = eventsDir();
+  if (!existsSync(dir)) return [];
   const out: SerfEvent[] = [];
 
-  for (const f of readdirSync(EVENTS_DIR).filter(f => f.endsWith(".jsonl"))) {
+  for (const f of readdirSync(dir).filter(f => f.endsWith(".jsonl"))) {
     try {
-      const raw = readFileSync(join(EVENTS_DIR, f), "utf-8");
+      const raw = readFileSync(join(dir, f), "utf-8");
       for (const line of raw.split("\n")) {
         if (!line.trim()) continue;
         try {

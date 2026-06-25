@@ -12,6 +12,8 @@ async function main() {
     case "task":     await handleTask(args); return;
     case "board":    await handleBoard(args); return;
     case "start":    await handleStart(args); return;
+    case "config":   handleConfig(args); return;
+    case "agents":   handleAgents(args); return;
     case "health":   await handleHealth(args); return;
     case "help":
     case "--help":
@@ -30,7 +32,8 @@ async function main() {
 function handleInit() {
   const { existsSync, mkdirSync, writeFileSync } = require("node:fs");
   const { join } = require("node:path");
-  const dir = join(process.cwd(), ".serf");
+  const { getSerfDir } = require("./v2/paths");
+  const dir = getSerfDir();
 
   if (existsSync(dir)) {
     console.log("\n  .serf/ already exists. Use 'serf task' to add work.\n");
@@ -45,46 +48,65 @@ function handleInit() {
   mkdirSync(join(dir, "knowledge", "skills"), { recursive: true });
   mkdirSync(join(dir, "knowledge", "patterns"), { recursive: true });
   mkdirSync(join(dir, "knowledge", "failures"), { recursive: true });
+  mkdirSync(join(dir, "knowledge", "references"), { recursive: true });
   mkdirSync(join(dir, "events"), { recursive: true });
+  mkdirSync(join(dir, "worktrees"), { recursive: true });
+  mkdirSync(join(dir, "workspaces", "actor", ".serf"), { recursive: true });
+  mkdirSync(join(dir, "workspaces", "critic", ".serf", "verdicts"), { recursive: true });
 
-  writeFileSync(join(dir, "plan.md"), "# Plan\n\nThe mission and current direction. Edit this to guide the master serf.\n");
+  writeFileSync(join(dir, "plan.md"), "# Plan\n\nThe mission and current direction.\n");
 
-  writeFileSync(join(dir, "serfs", "master.md"), `# master
+  writeFileSync(join(dir, "serfs", "actor.md"), `# actor
 
 ## Mission
-Coordinate the project. Receive tasks, break them down, execute, critique, ensure quality.
+Execute tasks. Read the .serf/ folder, understand the task, do the work, write results.
 
 ## Persona
-Decisive, fair, demanding. Expects quality but blames the task when serfs fail.
+Direct, capable, autonomous. Reads the folder, does the work, doesn't stop to ask.
 
 ## Lever
-- callLLM for planning and execution
-- GAN critic for quality enforcement
-- Board for task tracking
+- .serf/ folder (board, knowledge, serfs, plan)
+- File system
+- Build and test commands
 
 ## Measurement
 - GAN critic pass rate: >70%
-- User acceptance rate: >70%
+- Task completion: >80%
 
 ## Fate
-Always running. If I fail 3 times, the task description is bad.
-
-## Last State
-- Last task: none
-- Completed: no
-- Context summary: none
-- Next step: waiting for assignment
-- Timestamp: ${new Date().toISOString()}
+If I fail 3 times, the task description is bad, not me. The critic may spawn a specialized serf to handle what I can't.
 `);
 
-  console.log("\n  ✓ .serf/ created in current project");
+  writeFileSync(join(dir, "serfs", "critic.md"), `# critic
+
+## Mission
+Evaluate actor output adversarially. Find real problems. Don't be lenient.
+
+## Persona
+Hostile, precise, adversarial. Would you accept this from a subordinate? If not, fail it.
+
+## Lever
+- callLLM for evaluation
+- .serf/knowledge/ for standards and past failures
+
+## Measurement
+- False pass rate: <10% (if I pass it, it should actually be good)
+- High-confidence fail accuracy: >90%
+
+## Fate
+If I keep passing bad work, I'm not adversarial enough. If I keep failing good work, my criteria are wrong.
+`);
+
+  console.log("\n  ✓ .serf/ created");
   console.log("    ├── board/         (backlog, in-progress, review, done)");
-  console.log("    ├── serfs/         (master.md created)");
-  console.log("    ├── knowledge/     (skills, patterns, failures)");
-  console.log("    ├── events/        (audit trail)");
-  console.log("    └── plan.md        (edit this with your mission)");
+  console.log("    ├── serfs/          (actor, critic)");
+  console.log("    ├── knowledge/      (skills, patterns, failures, references)");
+  console.log("    ├── workspaces/     (per-agent private state)");
+  console.log("    ├── worktrees/      (per-task isolated checkouts)");
+  console.log("    ├── events/         (audit trail)");
+  console.log("    └── plan.md         (edit this with your mission)");
   console.log("\n  Next: serf task \"do something\"");
-  console.log("  Then: tell your agent to read SERF.md\n");
+  console.log("  Then: serf start  to process the board\n");
 }
 
 // ── TASK ──
@@ -163,6 +185,16 @@ async function handleStart(args: string[]) {
   const budgetLimit = budgetFlag >= 0 ? parseInt(args[budgetFlag + 1], 10) : undefined;
   const modelFlag = args.indexOf("--model");
   const model = modelFlag >= 0 ? args[modelFlag + 1] : undefined;
+  const agentFlag = args.indexOf("--agent");
+  const agent = agentFlag >= 0 ? args[agentFlag + 1] : undefined;
+
+  if (agent) {
+    const { loadConfig, saveConfig } = require("./state");
+    const config = loadConfig() ?? { transport: "pi", model: "qwen3.5", backend: "ollama" };
+    config.agent = agent;
+    saveConfig(config);
+  }
+
   await startMaster({ budgetLimit, model });
 }
 
@@ -194,7 +226,8 @@ async function handleHealth(args: string[]) {
 async function handleDefault() {
   const { existsSync } = require("node:fs");
   const { join } = require("node:path");
-  const serfDir = join(process.cwd(), ".serf");
+  const { getSerfDir } = require("./v2/paths");
+  const serfDir = getSerfDir();
 
   if (!existsSync(serfDir)) {
     console.log("\n  No .serf/ folder in this project. Run: serf init\n");
@@ -202,6 +235,83 @@ async function handleDefault() {
   }
 
   await handleBoard([]);
+}
+
+// ── CONFIG ──
+
+function handleConfig(args: string[]) {
+  const { loadConfig, saveConfig } = require("./state");
+
+  if (args.length === 0 || args[0] === "show") {
+    const config = loadConfig();
+    if (!config) {
+      console.log("\n  No config found. Run: serf config set agent claude\n");
+      return;
+    }
+    console.log("\n  Serf Config (~/.serf/config.json):");
+    console.log(JSON.stringify(config, null, 2));
+    console.log("");
+    return;
+  }
+
+  if (args[0] === "set") {
+    const key = args[1];
+    const value = args[2];
+    if (!key || value === undefined) {
+      console.log("Usage: serf config set <key> <value>");
+      console.log("Keys: agent, terminal, model, backend, transport");
+      process.exit(1);
+    }
+    const config = loadConfig() ?? { transport: "pi", model: "qwen3.5", backend: "ollama" };
+    config[key] = value;
+    saveConfig(config);
+    console.log(`\n  ✓ ${key} = ${value}\n`);
+    return;
+  }
+
+  console.log("Usage: serf config [show|set <key> <value>]");
+}
+
+// ── AGENTS ──
+
+function handleAgents(args: string[]) {
+  const { loadConfig, saveConfig } = require("./state");
+  const { listAgents } = require("./v2/executor");
+  const { execSync } = require("node:child_process");
+  const agents = listAgents();
+
+  if (args.length === 0 || args[0] === "list") {
+    const config = loadConfig();
+    const current = config?.agent ?? "claude";
+
+    console.log("\n  Available agents:");
+    for (const name of agents) {
+      let installed = "✗";
+      try {
+        execSync(`which ${name}`, { stdio: "ignore" });
+        installed = "✓";
+      } catch {}
+      const marker = name === current ? " ← current" : "";
+      console.log(`    ${installed} ${name}${marker}`);
+    }
+    console.log("");
+    return;
+  }
+
+  if (args[0] === "use") {
+    const agent = args[1];
+    if (!agent || !agents.includes(agent)) {
+      console.log(`Unknown agent: ${agent}. Run: serf agents list`);
+      process.exit(1);
+    }
+    const config = loadConfig() ?? { transport: "pi", model: "qwen3.5", backend: "ollama" };
+    config.agent = agent;
+    saveConfig(config);
+    console.log(`\n  ✓ Agent set to: ${agent}\n`);
+    return;
+  }
+
+  console.log("Usage: serf agents [list|use <name>]");
 }
 
 // ── HELP ──
@@ -215,20 +325,21 @@ USAGE:
   serf task "do something"           Add a task to the board
   serf board                         Show the kanban board
   serf start                         Master serf processes the board
+  serf agents [list|use <name>]      List or select coding agent
+  serf config [show|set <k> <v>]     Show or set config
   serf health [--gan] [--strict]     Run build + test + typecheck (+ GAN)
   serf board move <id> <column>      Move a card between columns
+
+AGENTS:
+  claude, opencode, aider, pi, hermes, codex (headless — run in terminal, capture output)
+  cursor, code (interactive — open editor, user works)
 
 THE PROTOCOL:
   Tell your agent: "Read SERF.md and follow the protocol."
   The agent reads the board, picks up a task, executes, critiques, writes result.
 
-WITH HERDR:
-  Install: curl -fsSL https://herdr.dev/install.sh | sh
-  Run: herdr
-  The master serf spawns panes, checks state, and runs the GAN critic as a separate pane.
-
 CONFIGURATION:
-  ~/.serf/config.json — global config (model, backend, transport)
+  ~/.serf/config.json — global config (agent, terminal, model, backend)
   .serf/plan.md — project mission and direction
   .serf/serfs/ — serf identities (mission/persona/lever/measurement/fate)
 `);

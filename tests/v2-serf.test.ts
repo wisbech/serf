@@ -1,5 +1,21 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { createSerf, readSerf, listSerfs, morphSerf, deprecateSerf, MASTER_IDENTITY, type SerfIdentity } from "../src/v2/serf";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+const TMP = join(tmpdir(), `serf-serf-test-${Date.now()}`);
+
+beforeEach(() => {
+  process.env.SERF_HOME = TMP;
+  mkdirSync(join(TMP, "serfs"), { recursive: true });
+  mkdirSync(join(TMP, "knowledge", "retired"), { recursive: true });
+});
+
+afterEach(() => {
+  delete process.env.SERF_HOME;
+  rmSync(TMP, { recursive: true, force: true });
+});
 
 describe("Serf Identity", () => {
   test("createSerf + readSerf round-trip", () => {
@@ -68,5 +84,27 @@ describe("Serf Identity", () => {
     expect(MASTER_IDENTITY.lever.length).toBeGreaterThan(0);
     expect(MASTER_IDENTITY.measurement.length).toBeGreaterThan(0);
     expect(MASTER_IDENTITY.fate.length).toBeGreaterThan(0);
+  });
+
+  test("prefs round-trip through markdown", () => {
+    const name = `prefs-test-${Date.now()}`;
+    const identity: SerfIdentity = {
+      name,
+      mission: "Test prefs",
+      persona: "Test",
+      lever: [],
+      measurement: [],
+      fate: "done",
+      model: "qwen3.5",
+      editor: "nvim",
+      prefs: { theme: "dark", tabWidth: "2" },
+    };
+    createSerf(identity);
+
+    const read = readSerf(name);
+    expect(read).not.toBeNull();
+    expect(read!.model).toBe("qwen3.5");
+    expect(read!.editor).toBe("nvim");
+    expect(read!.prefs).toEqual({ theme: "dark", tabWidth: "2" });
   });
 });

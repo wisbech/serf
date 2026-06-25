@@ -29,13 +29,28 @@
 │   ├── in-progress/     # tasks being worked on
 │   ├── review/          # tasks awaiting critique or human review
 │   └── done/            # completed tasks
-├── serfs/               # .md files, one per serf (mission/persona/lever/measurement/fate/last-state)
+├── serfs/               # .md files, one per serf
+│   ├── master.md        # coordinates, delegates, reviews
+│   ├── coder.md         # writes code, tests, fixes bugs
+│   ├── researcher.md    # investigates, cites sources
+│   └── writer.md        # documents, plans, prose
 ├── knowledge/
-│   ├── skills/          # what works
-│   ├── patterns/        # recurring solutions
-│   └── failures/        # what didn't work and why
+│   ├── skills/          # what works (accumulated from successful tasks)
+│   ├── patterns/        # recurring solutions (accumulated from repeated work)
+│   ├── failures/        # what didn't work and why (accumulated from failed tasks)
+│   ├── references/      # source material (papers, docs)
+│   └── retired/         # deprecated serf identities (pruned, not deleted)
 └── events/              # *.jsonl append-only audit trail
 ```
+
+The folder **evolves**. Every task adds to it:
+- Completed task → serf updates its `## Last State`, knowledge gains a skill
+- Failed task → knowledge gains a failure entry
+- Repeated pattern → knowledge gains a pattern entry
+- New capability needed → master spawns a new serf in `serfs/`
+- Serf no longer useful → master moves it to `knowledge/retired/`
+
+The knowledge directory IS the factory's memory. It compounds. A serf starting a task reads the accumulated skills, patterns, and failures — it benefits from everything the factory has learned.
 
 Global config (model, budget) lives in `~/.serf/config.json` — like `~/.gitconfig`.
 

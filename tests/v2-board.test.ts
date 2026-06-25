@@ -1,11 +1,23 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { addTask, readCard, moveCard, listCards, writeCard, setFeedback, deleteCard, type Card } from "../src/v2/board";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { addTask, readCard, moveCard, listCards, writeCard, setFeedback, deleteCard } from "../src/v2/board";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 
-const SERF_DIR = join(homedir(), ".serf");
-const BOARD_DIR = join(SERF_DIR, "board");
+const TMP = join(tmpdir(), `serf-test-${Date.now()}`);
+
+beforeEach(() => {
+  process.env.SERF_HOME = TMP;
+  mkdirSync(join(TMP, "board", "backlog"), { recursive: true });
+  mkdirSync(join(TMP, "board", "in-progress"), { recursive: true });
+  mkdirSync(join(TMP, "board", "review"), { recursive: true });
+  mkdirSync(join(TMP, "board", "done"), { recursive: true });
+});
+
+afterEach(() => {
+  delete process.env.SERF_HOME;
+  rmSync(TMP, { recursive: true, force: true });
+});
 
 describe("Board", () => {
   test("addTask creates a card in backlog", () => {

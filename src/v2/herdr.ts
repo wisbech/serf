@@ -36,7 +36,7 @@ export function isHerdrRunning(): boolean {
   return existsSync(getSocketPath());
 }
 
-export async function send(method: string, params: Record<string, unknown> = {}): Promise<any> {
+export async function send(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<any> {
   const socketPath = getSocketPath();
   if (!existsSync(socketPath)) {
     throw new Error(`herdr socket not found at ${socketPath}. Is herdr running?`);
@@ -44,6 +44,7 @@ export async function send(method: string, params: Record<string, unknown> = {})
 
   const id = `serf-${++requestId}`;
   const message = JSON.stringify({ id, method, params }) + "\n";
+  const timeout = timeoutMs ?? (method === "agent.start" ? 60_000 : 30_000);
 
   return new Promise((resolve, reject) => {
     const socket = connect(socketPath);
@@ -62,13 +63,15 @@ export async function send(method: string, params: Record<string, unknown> = {})
         if (!line.trim()) continue;
         try {
           const response = JSON.parse(line);
+          // herdr returns id: "" on errors, so match on error OR our id
+          if (response.error) {
+            socket.destroy();
+            reject(new Error(response.error.message || "herdr error"));
+            return;
+          }
           if (response.id === id) {
             socket.destroy();
-            if (response.error) {
-              reject(new Error(response.error.message || "herdr error"));
-            } else {
-              resolve(response.result);
-            }
+            resolve(response.result);
             return;
           }
         } catch {}
@@ -82,7 +85,7 @@ export async function send(method: string, params: Record<string, unknown> = {})
     setTimeout(() => {
       socket.destroy();
       reject(new Error(`herdr socket timeout for ${method}`));
-    }, 30_000);
+    }, timeout);
   });
 }
 
@@ -116,7 +119,31 @@ export async function splitPane(workspaceId: string, direction: "right" | "down"
 }
 
 export async function sendInput(paneId: string, text: string): Promise<boolean> {
+  // Type text into the pane, then press Enter separately
+  // TUI apps (opencode, claude) need a real keypress, not \n in the text
   await send("pane.send_text", { pane_id: paneId, text });
+  await send("pane.send_keys", { pane_id: paneId, keys: ["enter"] });
+  return true;
+}
+
+export async function typeText(paneId: string, text: string): Promise<boolean> {
+  // Type text into the pane WITHOUT pressing enter — user reviews and presses enter themselves
+  await send("pane.send_text", { pane_id: paneId, text });
+  return true;
+}
+
+export async function sendCommand(paneId: string, command: string): Promise<boolean> {
+  // Type a shell command and press Enter
+  await send("pane.send_text", { pane_id: paneId, text: command });
+  await send("pane.send_keys", { pane_id: paneId, keys: ["enter"] });
+  return true;
+}
+
+export async function sendPrompt(paneId: string, prompt: string): Promise<boolean> {
+  // Send a multi-line prompt to an interactive process (like ollama)
+  // Type the text, then press Enter to submit
+  await send("pane.send_text", { pane_id: paneId, text: prompt });
+  await send("pane.send_keys", { pane_id: paneId, keys: ["enter"] });
   return true;
 }
 
@@ -181,15 +208,13 @@ export function spawnAgent(paneId: string, command: string, args: string[] = [])
 export async function startAgent(name: string, command: string, args: string[], options?: {
   workspaceId?: string;
   cwd?: string;
-  split?: "right" | "down";
 }): Promise<PaneInfo> {
   const params: Record<string, unknown> = {
     name,
-    command: [command, ...args],
+    argv: [command, ...args],
   };
   if (options?.workspaceId) params.workspace_id = options.workspaceId;
   if (options?.cwd) params.cwd = options.cwd;
-  if (options?.split) params.split = options.split;
 
   const result = await send("agent.start", params);
   return result.pane || result.agent;
@@ -211,4 +236,99 @@ export function ensureHerdr(): boolean {
   }
 
   return isHerdrRunning();
+}
+
+// ── HERDR AGENT ──
+
+export function buildAgentCmd(name: string, model?: string): string {
+  const m = model ? ` --model ${model}` : "";
+  if (name === "opencode") return model ? `opencode -m ${model}` : "opencode";
+  if (name === "aider") return `aider${m} --yes-always`;
+  if (name === "hermes") return model ? `hermes chat -m ${model}` : "hermes chat";
+  return name === "claude" || name === "pi" || name === "codex"
+    ? `${name}${m}`
+    : name;
+}
+
+export class HerdrAgent {
+  paneId: string;
+  role: string;
+  agentName: string;
+  model?: string;
+  ready = false;
+
+  private constructor(paneId: string, role: string, agentName: string, model?: string) {
+    this.paneId = paneId;
+    this.role = role;
+    this.agentName = agentName;
+    this.model = model;
+  }
+
+  static async create(
+    workspaceId: string,
+    role: string,
+    agentName: string,
+    model?: string,
+    direction: "right" | "down" = "right",
+  ): Promise<HerdrAgent> {
+    const pane = await splitPane(workspaceId, direction);
+    const agent = new HerdrAgent(pane.pane_id, role, agentName, model);
+
+    await sendCommand(agent.paneId, `echo "╔══ SERF ${role.toUpperCase()} (${agentName}) ══╗"`);
+    await sendCommand(agent.paneId, buildAgentCmd(agentName, model));
+    await new Promise(r => setTimeout(r, 5000));
+    agent.ready = true;
+
+    return agent;
+  }
+
+  static fromExisting(paneId: string, role: string, agentName: string, model?: string): HerdrAgent {
+    const agent = new HerdrAgent(paneId, role, agentName, model);
+    agent.ready = true;
+    return agent;
+  }
+
+  async send(prompt: string): Promise<void> {
+    await sendInput(this.paneId, prompt);
+  }
+
+  async waitForDone(timeoutMs = 600_000): Promise<string> {
+    const start = Date.now();
+    let lastContent = "";
+    let stableCount = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      await new Promise(r => setTimeout(r, 3000));
+
+      let content = "";
+      try { content = await readPane(this.paneId, 200); }
+      catch { return lastContent; }
+
+      try {
+        const pane = await getPane(this.paneId);
+        if (pane.agent_status === "idle" && content.length > 50) {
+          return content;
+        }
+      } catch {}
+
+      if (content === lastContent && content.length > 50) {
+        stableCount++;
+        if (stableCount >= 5) return content;
+      } else {
+        stableCount = 0;
+        lastContent = content;
+      }
+    }
+
+    return lastContent;
+  }
+
+  async ask(question: string, timeoutMs = 300_000): Promise<string> {
+    await this.send(question);
+    return this.waitForDone(timeoutMs);
+  }
+
+  async close(): Promise<void> {
+    try { await closePane(this.paneId); } catch {}
+  }
 }

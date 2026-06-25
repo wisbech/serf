@@ -10,11 +10,22 @@ export interface Config {
   model: string;
   backend: string;
   apiKey?: string;
+  agent?: string;
+  terminal?: string;
 }
+
+const DEFAULTS: Partial<Config> = {
+  agent: "claude",
+  terminal: "ghostty",
+  backend: "ollama",
+  model: "qwen3.5",
+  transport: "pi",
+};
 
 export function loadConfig(): Config | null {
   try {
-    return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+    const raw = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+    return { ...DEFAULTS, ...raw } as Config;
   } catch { return null; }
 }
 
