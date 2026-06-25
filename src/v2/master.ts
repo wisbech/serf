@@ -1,7 +1,7 @@
 import { callLLM, BudgetTracker } from "./llm";
 import { critique, classifyVerdict, parseVerdict, type CriticVerdict } from "./critic";
 import { critiqueMultipass, classifyMultipass, type MultiPassVerdict, type Effort, type CuriosityPoint, EFFORT_PASSES, type CritiqueFn } from "./critic_multipass";
-import { readCard, moveCard, writeCard, listCards, type Card } from "./board";
+import { readCard, moveCard, writeCard, listCards, addTask, type Card } from "./board";
 import { readSerf, listSerfs, createSerf, type SerfIdentity } from "./serf";
 import { appendEvent } from "./events";
 import * as herdr from "./herdr";
@@ -10,7 +10,7 @@ import { spawnAgent, buildAgentPrompt, buildCriticAgentPrompt, buildCriticFollow
 import { getSerfDir, ensureDir } from "./paths";
 import { loadConfig } from "../state";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, watch, execSync, symlinkSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, watch, readdirSync, statSync, execSync, symlinkSync } from "node:fs";
 
 const MAX_RETRIES = 3;
 const AGREEMENT_THRESHOLD = 0.7;
@@ -54,9 +54,16 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
         break;
       }
 
-      // Wait for new cards via filesystem events — no polling
-      console.log(`  Board empty. Waiting for tasks... (serf task "do something")`);
-      await waitForNewCards();
+      // Phase 3: continuous dialogue — ask the user what to work on
+      const taskDescription = await askUser();
+      if (taskDescription === null) {
+        // User exited
+        console.log("\n  Goodbye.\n");
+        break;
+      }
+      if (taskDescription.trim().length > 0) {
+        await interactiveIntake(taskDescription, options.model);
+      }
       continue;
     }
 
@@ -79,38 +86,6 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
 }
 
 // Event-driven wait — watches the backlog directory for new .md files
-function waitForNewCards(): Promise<void> {
-  return new Promise((resolve) => {
-    const serfDir = getSerfDir();
-    const backlogDir = join(serfDir, "board", "backlog");
-    ensureDir(backlogDir);
-
-    const watcher = watch(backlogDir, (eventType, filename) => {
-      if (filename && filename.endsWith(".md")) {
-        watcher.close();
-        resolve();
-      }
-    });
-
-    // Also watch in-progress (resumed tasks)
-    const inProgressDir = join(serfDir, "board", "in-progress");
-    const watcher2 = watch(inProgressDir, (eventType, filename) => {
-      if (filename && filename.endsWith(".md")) {
-        watcher.close();
-        watcher2.close();
-        resolve();
-      }
-    });
-
-    // Safety timeout — if watcher fails, wake up after 60s
-    setTimeout(() => {
-      watcher.close();
-      watcher2.close();
-      resolve();
-    }, 60_000);
-  });
-}
-
 async function processCard(card: Card, budget: BudgetTracker, model?: string, useHerdr = false, harness?: HerdrHarness | null): Promise<void> {
   console.log(`\n  ▶ ${card.title}`);
 
@@ -586,6 +561,160 @@ function removeWorktree(card: Card, merge: boolean): void {
 
   try { execSync(`git worktree remove --force "${worktreePath}"`, { stdio: "pipe" }); } catch {}
   try { execSync(`git branch -D ${card.id} 2>/dev/null`, { stdio: "pipe" }); } catch {}
+}
+
+// ── INTERACTIVE INTAKE ──
+
+async function askUser(): Promise<string | null> {
+  const readline = await import("node:readline");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(resolve => {
+    rl.question("\n  What would you like to work on? (or 'exit' to quit) ", answer => {
+      rl.close();
+      const trimmed = answer.trim();
+      if (trimmed === "exit" || trimmed === "quit" || trimmed === "q") {
+        resolve(null);
+      } else {
+        resolve(trimmed);
+      }
+    });
+  });
+}
+
+async function interactiveIntake(description: string, model?: string): Promise<void> {
+  const serfDir = getSerfDir();
+  const cwd = process.cwd();
+
+  const projectFiles = scanProjectForIntake(cwd);
+  const planMd = existsSync(join(serfDir, "plan.md")) ? readFileSync(join(serfDir, "plan.md"), "utf-8").slice(0, 500) : "";
+  const knowledgeSkills = listKnowledgeForIntake(serfDir, "skills");
+  const knowledgeFailures = listKnowledgeForIntake(serfDir, "failures");
+  const boardCards = listBoardCardsForIntake(serfDir);
+
+  const prompt = `You are the master serf for a project. A user wants to add a task: "${description}".
+
+Survey the project and propose a formal task card.
+
+PROJECT STRUCTURE:
+${projectFiles}
+
+PLAN:
+${planMd}
+
+KNOWLEDGE (skills):
+${knowledgeSkills}
+
+PAST FAILURES:
+${knowledgeFailures}
+
+CURRENT BOARD:
+${boardCards}
+
+Respond with EXACTLY this format:
+
+INTRO: <1-2 sentences: who you are, what the project is, what's going on>
+QUESTIONS: <clarifying questions if the task is ambiguous, or "none" if clear>
+TASK: <the formal task title — concise, actionable>
+ACCEPTANCE: <bullet list, one per line, each starting with "- ", specific and falsifiable>
+CONTEXT: <relevant context from the codebase, or "none">`;
+
+  console.log(`  Master is surveying the project...`);
+  const { text } = await callLLM(prompt, { model });
+
+  const intro = text.match(/INTRO:\s*(.+?)(?=\n(?:QUESTIONS|TASK|ACCEPTANCE|CONTEXT|$$))/s)?.[1]?.trim() ?? "";
+  const questions = text.match(/QUESTIONS:\s*(.+?)(?=\n(?:TASK|ACCEPTANCE|CONTEXT|$$))/s)?.[1]?.trim() ?? "";
+  const taskTitle = text.match(/TASK:\s*(.+)/)?.[1]?.trim() ?? description;
+  const acceptanceBlock = text.match(/ACCEPTANCE:\s*(.+?)(?=\n(?:CONTEXT|$$))/s)?.[1]?.trim() ?? "";
+  const context = text.match(/CONTEXT:\s*(.+?)(?:\n$$|$)/s)?.[1]?.trim() ?? "";
+
+  console.log(`\n  ╔══ MASTER SERF ══════════════════════════════`);
+  console.log(`  ║ ${intro}`);
+  if (questions && questions.toLowerCase() !== "none") {
+    console.log(`  ║`);
+    console.log(`  ║ Questions:`);
+    for (const q of questions.split("\n").filter(l => l.trim())) {
+      console.log(`  ║   ${q.trim()}`);
+    }
+  }
+  console.log(`  ║`);
+  console.log(`  ║ Proposed task:`);
+  console.log(`  ║   Task: ${taskTitle}`);
+  console.log(`  ║   Acceptance:`);
+  for (const line of acceptanceBlock.split("\n").filter(l => l.trim())) {
+    console.log(`  ║     ${line.replace(/^[-*]\s*/, "").trim()}`);
+  }
+  if (context && context.toLowerCase() !== "none") {
+    console.log(`  ║   Context: ${context.slice(0, 200)}`);
+  }
+  console.log(`  ╚════════════════════════════════════════════\n`);
+
+  const readline = await import("node:readline");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>(resolve => {
+    rl.question("  Approve? (y/n) ", a => { rl.close(); resolve(a.trim().toLowerCase()); });
+  });
+
+  if (answer === "y" || answer === "yes") {
+    const acceptance = acceptanceBlock
+      .split("\n")
+      .map(l => l.replace(/^[-*]\s*/, "").trim())
+      .filter(l => l.length > 0);
+    const card = addTask(taskTitle, taskTitle, acceptance.length > 0 ? acceptance : ["GAN critic passes"]);
+    console.log(`\n  ✓ Task added to backlog: ${card.id}\n`);
+  } else {
+    console.log(`\n  Task not added.\n`);
+  }
+}
+
+function scanProjectForIntake(cwd: string): string {
+  const lines: string[] = [];
+  try {
+    const entries = readdirSync(cwd).filter(f => !f.startsWith(".") && f !== "node_modules" && f !== "dist" && f !== "target");
+    for (const entry of entries.slice(0, 30)) {
+      const full = join(cwd, entry);
+      try {
+        const stat = statSync(full);
+        lines.push(stat.isDirectory() ? `  ${entry}/` : `  ${entry}`);
+      } catch {}
+    }
+  } catch {}
+
+  let pkgInfo = "";
+  const pkgPath = join(cwd, "package.json");
+  if (existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+      pkgInfo = `\npackage.json: ${pkg.name ?? "?"} v${pkg.version ?? "?"} — ${pkg.description ?? ""}`.trim();
+    } catch {}
+  }
+
+  return `Files:\n${lines.join("\n")}${pkgInfo ? "\n\n" + pkgInfo : ""}`;
+}
+
+function listKnowledgeForIntake(serfDir: string, subdir: string): string {
+  const dir = join(serfDir, "knowledge", subdir);
+  if (!existsSync(dir)) return "none";
+  try {
+    const files = readdirSync(dir).filter(f => f.endsWith(".md")).slice(-5);
+    if (files.length === 0) return "none";
+    return files.map(f => `- ${f.replace(/\.md$/, "")}`).join("\n");
+  } catch { return "none"; }
+}
+
+function listBoardCardsForIntake(serfDir: string): string {
+  const cols = ["backlog", "in-progress", "review", "done"];
+  const lines: string[] = [];
+  for (const col of cols) {
+    const dir = join(serfDir, "board", col);
+    if (!existsSync(dir)) continue;
+    try {
+      const files = readdirSync(dir).filter(f => f.endsWith(".md"));
+      if (files.length > 0) {
+        lines.push(`${col} (${files.length}): ${files.map(f => f.replace(/\.md$/, "")).join(", ")}`);
+      }
+    } catch {}
+  }
+  return lines.length > 0 ? lines.join("\n") : "empty";
 }
 
 export { readCard, moveCard, listCards, writeCard, type Card };
