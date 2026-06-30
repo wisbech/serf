@@ -3,6 +3,7 @@ import { critique, classifyVerdict, parseVerdict, type CriticVerdict } from "./c
 import { critiqueMultipass, classifyMultipass, type MultiPassVerdict, type Effort, type CuriosityPoint, EFFORT_PASSES, type CritiqueFn } from "./critic_multipass";
 import { readCard, moveCard, writeCard, listCards, type Card } from "./board";
 import { readSerf, listSerfs, createSerf, type SerfIdentity } from "./serf";
+import { renamePane } from "./herdr";
 import { appendEvent } from "./events";
 import * as herdr from "./herdr";
 import { HerdrAgent } from "./herdr";
@@ -10,7 +11,8 @@ import { spawnAgent, buildAgentPrompt, buildMasterPrompt, buildCriticAgentPrompt
 import { getSerfDir, ensureDir } from "./paths";
 import { loadConfig } from "../state";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, execSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
+import { execSync } from "node:child_process";
 
 const MAX_RETRIES = 3;
 const AGREEMENT_THRESHOLD = 0.7;
@@ -98,24 +100,36 @@ async function processCard(card: Card, budget: BudgetTracker, model?: string, us
   moveCard(card.id, "in-progress");
   appendEvent("task.started", { card: card.id, title: card.title });
 
-  const worktreePath = createWorktree(card);
-  if (worktreePath) {
-    console.log(`    → worktree: ${worktreePath.split("/").slice(-2).join("/")}`);
-  }
-
-  let result: "done" | "review" = "review";
-
-  if (useHerdr && harness) {
-    try {
-      result = await processWithHerdr(card, budget, harness);
-    } catch (err) {
-      console.log(`  ⚠ herdr failed: ${err instanceof Error ? err.message : String(err)}`);
-      moveCard(card.id, "review");
-      appendEvent("task.failed", { card: card.id, reason: "herdr-error" });
+    const worktreePath = createWorktree(card);
+    if (worktreePath) {
+      console.log(`    → worktree: ${worktreePath.split("/").slice(-2).join("/")}`);
     }
-  } else {
-    result = await processDirect(card, budget, model);
-  }
+
+    // Create a per-card herdr harness so panes are labeled with the task context
+    let cardHarness: HerdrHarness | null = null;
+    if (useHerdr) {
+      try {
+        cardHarness = await HerdrHarness.create(model, card.title.slice(0, 30));
+      } catch (err) {
+        console.log(`  ⚠ herdr harness failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    let result: "done" | "review" = "review";
+
+    if (useHerdr && cardHarness) {
+      try {
+        result = await processWithHerdr(card, budget, cardHarness);
+      } catch (err) {
+        console.log(`  ⚠ herdr failed: ${err instanceof Error ? err.message : String(err)}`);
+        moveCard(card.id, "review");
+        appendEvent("task.failed", { card: card.id, reason: "herdr-error" });
+      } finally {
+        await cardHarness.close();
+      }
+    } else {
+      result = await processDirect(card, budget, model);
+    }
 
   if (worktreePath) {
     removeWorktree(card, result === "done");
@@ -136,7 +150,7 @@ class HerdrHarness {
     this.critic = critic;
   }
 
-  static async create(model?: string): Promise<HerdrHarness> {
+  static async create(model?: string, context?: string): Promise<HerdrHarness> {
     const config = loadConfig();
     const agentName = config?.agent ?? "claude";
     const agentModel = model || config?.model;
@@ -147,16 +161,20 @@ class HerdrHarness {
     console.log(`  → herdr workspace: ${ws.workspace_id}`);
 
     const rootPaneId = ws.workspace_id + ":p1";
-    await herdr.sendCommand(rootPaneId, `echo "╔══ SERF ACTOR (${agentName}) ══╗"`);
+    const actorLabel = context ? `actor:${context}` : "actor";
+    if (context) {
+      try { await herdr.renamePane(rootPaneId, actorLabel); } catch {}
+    }
+    await herdr.sendCommand(rootPaneId, `echo "╔══ SERF ACTOR (${agentName}) ${context ? `- ${context}` : ""} ══╗"`);
     await herdr.sendCommand(rootPaneId, herdr.buildAgentCmd(agentName, agentModel));
     await new Promise(r => setTimeout(r, 5000));
     const actor = HerdrAgent.fromExisting(rootPaneId, "actor", agentName, agentModel);
-    console.log(`    → Actor ready (${agentName})`);
+    console.log(`    → Actor ready (${agentName}) ${context ? `| ${context}` : ""}`);
 
     let critic: HerdrAgent | null = null;
     try {
-      critic = await HerdrAgent.create(ws.workspace_id, "critic", criticAgentName, criticModel, "right");
-      console.log(`    → Critic ready (${criticAgentName})`);
+      critic = await HerdrAgent.create(ws.workspace_id, "critic", criticAgentName, criticModel, "right", context);
+      console.log(`    → Critic ready (${criticAgentName}) ${context ? `| ${context}` : ""}`);
     } catch (err) {
       console.log(`    ⚠ Critic pane unavailable: ${err instanceof Error ? err.message : String(err)}. Using inline critic.`);
     }
@@ -166,6 +184,7 @@ class HerdrHarness {
 
   async close(): Promise<void> {
     if (this.critic) await this.critic.close();
+    try { await herdr.closePane(this.actor.paneId); } catch {}
   }
 }
 
@@ -180,12 +199,14 @@ async function processWithHerdr(card: Card, budget: BudgetTracker, harness: Herd
   while (attempt < MAX_RETRIES) {
     attempt++;
 
-    const prompt = buildAgentPrompt(card, { name: "actor", mission: "", persona: "", lever: [], measurement: [], fate: "" }, lastFeedback, attempt);
+    const actorIdentity = readSerf("actor") ?? { name: "actor", mission: "", persona: "", lever: [], measurement: [], fate: "" };
+    const prompt = buildAgentPrompt(card, actorIdentity, lastFeedback, attempt);
 
     await actor.send(prompt);
     console.log(`    → Attempt ${attempt}: actor working...`);
 
-    const output = await actor.waitForDone(600_000);
+    const outputPath = join(getSerfDir(), "board", "in-progress", `${card.id}-output.md`);
+    const output = await actor.waitForDone(outputPath, 600_000);
     console.log(`    → ${output.length} chars\n`);
 
     const { verdict: mpv } = await critiqueWithHerdr(card, output, critic, actor, attempt);
@@ -248,7 +269,8 @@ async function critiqueWithHerdr(
   await critic.send(criticPrompt);
   console.log(`    → Critic evaluating...`);
 
-  let criticOutput = await critic.waitForDone(600_000);
+  const verdictPath = join(getSerfDir(), "board", "in-progress", `${card.id}-verdict.md`);
+  let criticOutput = await critic.waitForDone(verdictPath, 600_000);
   let criticVerdict = parseVerdict(criticOutput);
 
   appendEvent("critic.pane.verdict", {
@@ -281,7 +303,7 @@ async function critiqueWithHerdr(
     });
 
     const resolvePrompt = buildCriticResolvePrompt(actorResponse);
-    criticOutput = await critic.ask(resolvePrompt, 300_000);
+    criticOutput = await critic.ask(resolvePrompt, verdictPath, 300_000);
     criticVerdict = parseVerdict(criticOutput);
 
     appendEvent("critic.pane.verdict", {
@@ -362,7 +384,8 @@ async function processDirect(card: Card, budget: BudgetTracker, model?: string):
   while (attempt < MAX_RETRIES) {
     attempt++;
 
-    const prompt = buildAgentPrompt(card, { name: "actor", mission: "", persona: "", lever: [], measurement: [], fate: "" }, lastFeedback, attempt);
+    const actor = readSerf("actor") ?? { name: "actor", mission: "", persona: "", lever: [], measurement: [], fate: "" };
+    const prompt = buildAgentPrompt(card, actor, lastFeedback, attempt);
 
     console.log(`    → Spawning ${agentName} (attempt ${attempt})...`);
     const execResult = await spawnAgent(prompt, {

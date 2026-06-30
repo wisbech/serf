@@ -48,8 +48,33 @@ function findCardColumn(id: string): Column | null {
   return null;
 }
 
+export function hasSimilarTask(title: string): Card | null {
+  const slug = slugify(title);
+  for (const col of COLUMNS) {
+    const dir = join(boardDir(), col);
+    if (!existsSync(dir)) continue;
+    for (const file of readdirSync(dir)) {
+      if (!file.endsWith(".md") || file.includes("-output") || file.includes("-plan") || file.includes("-verdict")) continue;
+      const id = file.replace(/\.md$/, "");
+      if (id.startsWith(slug)) {
+        const card = readCard(id);
+        if (card) return card;
+      }
+    }
+  }
+  return null;
+}
+
 export function addTask(title: string, task?: string, acceptance?: string[]): Card {
   ensureBoard();
+  const existing = hasSimilarTask(title);
+  if (existing) {
+    existing.context = `Task re-requested: "${title}". Original already exists as ${existing.id} in ${existing.column}.`;
+    existing.updatedAt = new Date().toISOString();
+    writeCard(existing);
+    return existing;
+  }
+
   const id = `${slugify(title)}-${Date.now().toString(36)}`;
   const now = new Date().toISOString();
   const card: Card = {
@@ -106,7 +131,7 @@ export function listCards(column?: Column): Card[] {
   for (const col of cols) {
     const dir = join(boardDir(), col);
     if (!existsSync(dir)) continue;
-    for (const file of readdirSync(dir).filter(f => f.endsWith(".md"))) {
+    for (const file of readdirSync(dir).filter(f => f.endsWith(".md") && !f.includes("-output") && !f.includes("-plan") && !f.includes("-verdict"))) {
       const id = file.replace(/\.md$/, "");
       const card = readCard(id);
       if (card) cards.push(card);

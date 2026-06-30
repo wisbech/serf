@@ -1,5 +1,5 @@
 import { connect } from "node:net";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
@@ -113,8 +113,29 @@ export async function closeWorkspace(workspaceId: string): Promise<boolean> {
   return true;
 }
 
-export async function splitPane(workspaceId: string, direction: "right" | "down" = "right"): Promise<PaneInfo> {
+export async function renamePane(paneId: string, label: string, retries = 3): Promise<boolean> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await send("pane.rename", { pane_id: paneId, label });
+      return true;
+    } catch {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  // Fallback: report metadata title
+  try {
+    await send("pane.report_metadata", { pane_id: paneId, source: "serf", title: label });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function splitPane(workspaceId: string, direction: "right" | "down" = "right", label?: string): Promise<PaneInfo> {
   const result = await send("pane.split", { workspace_id: workspaceId, direction });
+  if (label && result.pane?.pane_id) {
+    await renamePane(result.pane.pane_id, label).catch(() => {});
+  }
   return result.pane;
 }
 
@@ -270,11 +291,13 @@ export class HerdrAgent {
     agentName: string,
     model?: string,
     direction: "right" | "down" = "right",
+    context?: string,
   ): Promise<HerdrAgent> {
-    const pane = await splitPane(workspaceId, direction);
+    const label = context ? `${role}:${context}` : role;
+    const pane = await splitPane(workspaceId, direction, label);
     const agent = new HerdrAgent(pane.pane_id, role, agentName, model);
 
-    await sendCommand(agent.paneId, `echo "╔══ SERF ${role.toUpperCase()} (${agentName}) ══╗"`);
+    await sendCommand(agent.paneId, `echo "╔══ SERF ${role.toUpperCase()} (${agentName}) ${context ? `- ${context}` : ""} ══╗"`);
     await sendCommand(agent.paneId, buildAgentCmd(agentName, model));
     await new Promise(r => setTimeout(r, 5000));
     agent.ready = true;
@@ -292,21 +315,36 @@ export class HerdrAgent {
     await sendInput(this.paneId, prompt);
   }
 
-  async waitForDone(timeoutMs = 600_000): Promise<string> {
+  async waitForDone(outputPath?: string, timeoutMs = 600_000): Promise<string> {
     const start = Date.now();
     let lastContent = "";
     let stableCount = 0;
+    const completionMarker = "SERF_TASK_DONE";
 
     while (Date.now() - start < timeoutMs) {
       await new Promise(r => setTimeout(r, 3000));
+
+      // Prefer file-based completion signal if an output path was given
+      if (outputPath) {
+        try {
+          const fileContent = readFileSync(outputPath, "utf-8");
+          if (fileContent.includes(completionMarker)) {
+            return fileContent;
+          }
+        } catch {}
+      }
 
       let content = "";
       try { content = await readPane(this.paneId, 200); }
       catch { return lastContent; }
 
+      if (content.includes(completionMarker)) {
+        return content;
+      }
+
       try {
         const pane = await getPane(this.paneId);
-        if (pane.agent_status === "idle" && content.length > 50) {
+        if ((pane.agent_status === "idle" || pane.agent_status === "done") && content.length > 50) {
           return content;
         }
       } catch {}
@@ -323,9 +361,9 @@ export class HerdrAgent {
     return lastContent;
   }
 
-  async ask(question: string, timeoutMs = 300_000): Promise<string> {
+  async ask(question: string, outputPath?: string, timeoutMs = 300_000): Promise<string> {
     await this.send(question);
-    return this.waitForDone(timeoutMs);
+    return this.waitForDone(outputPath, timeoutMs);
   }
 
   async close(): Promise<void> {

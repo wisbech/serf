@@ -93,4 +93,29 @@ describe("Board", () => {
   test("moveCard returns null for unknown id", () => {
     expect(moveCard("nonexistent", "done")).toBeNull();
   });
+
+  test("addTask deduplicates similar titles", () => {
+    const first = addTask("Refactor auth module");
+    const duplicate = addTask("Refactor auth module");
+    expect(duplicate.id).toBe(first.id);
+
+    const all = listCards();
+    expect(all.filter(c => c.title === "Refactor auth module").length).toBe(1);
+  });
+
+  test("listCards ignores sidecar files", () => {
+    const card = addTask("Sidecar test");
+    moveCard(card.id, "in-progress");
+
+    // Create sidecar files that should not be listed as cards
+    const sidecars = ["-output.md", "-plan.md", "-verdict.md"];
+    const base = join(TMP, "board", "in-progress", card.id);
+    for (const suffix of sidecars) {
+      Bun.write(base + suffix, "# sidecar");
+    }
+
+    const inProgress = listCards("in-progress");
+    expect(inProgress.length).toBe(1);
+    expect(inProgress[0].id).toBe(card.id);
+  });
 });

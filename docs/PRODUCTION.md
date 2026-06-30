@@ -31,6 +31,8 @@ Success criteria for v1.0.0:
   - `evolutionary` — generate variations, tournament/select
   - These are opt-in per card; the default ring is simple actor-critic.
 - **No CLI dialogue.** The coding agent (Claude Code, opencode, etc.) is the conversational interface. The CLI only launches it.
+- **Package managers only.** The actor installs dependencies only via the project's package manager. `uv` is the preferred Python tool. No `curl | bash`, no global installs, no system directories.
+- **Containerization without Docker (future).** Once worktrees are solid, add opt-in container isolation using Apple Container (macOS-native Linux containers in lightweight VMs) or the NanoClaw pattern (per-agent containers with explicit mounts and credential proxying). Docker is not the default.
 - **One working solution.** All speculative plans and old architectures are archived.
 
 ## Current State (honest)
@@ -53,6 +55,25 @@ Success criteria for v1.0.0:
 - No more container isolation plans. Worktrees are enough.
 
 ## Phase 1: Harden herdr Mode (2-3 days)
+
+### 1.0 Package Manager Discipline
+
+The harness must enforce that agents only use project-local package managers. This is a security and reproducibility rule, not just a prompt suggestion.
+
+Rules baked into actor and critic prompts:
+- Detect the project's package manager from files in the worktree (bun/npm/pnpm/yarn for JS; uv/pip/poetry for Python; cargo for Rust).
+- For Python, prefer `uv` when `pyproject.toml`, `uv.lock`, or `requirements.txt` exists.
+- Install dependencies only via that package manager, locally.
+- Never run `curl | bash`, `wget | sh`, `sh -c`, or remote scripts.
+- Never write to `~/.ssh`, `~/.config`, `~/.local`, `/usr/`, `/opt/`, or any system directory.
+- Never use `sudo` or global installs.
+- If a required tool is missing, the actor adds it to the project manifest or asks the master to scope it.
+
+Future: a pre-execution check script scans the worktree for forbidden commands before the actor starts.
+
+Acceptance:
+- Actor prompt contains the package-manager rules.
+- A test verifies a mock shell command is rejected if it uses `curl | bash`.
 
 ### 1.1 Fix the agent launcher (`src/v2/executor.ts`)
 

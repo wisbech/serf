@@ -188,16 +188,22 @@ Your private state is at .serf/workspaces/${name}/.serf/. Write your working sta
 The critic can read your workspace for transparency — this helps it understand your reasoning, not to police you.
 
 ## Installation Rules
-- Install dependencies only via the project's package manager (bun/npm/pip/cargo).
-- Never run \`curl | bash\` or \`wget | sh\`.
-- Never write to ~/.ssh, ~/.config, ~/.local, /usr/, or /opt/.
-- Never install global packages. Use devDependencies or local installs only.
-- If a package is missing, add it to the project manifest and install locally.
+- Detect the project's package manager (bun/npm/pnpm for JS, uv/pip/poetry for Python, cargo for Rust) and use ONLY that.
+- For Python projects, prefer uv if a pyproject.toml or uv.lock exists. Never use pip globally.
+- Never run curl | bash, wget | sh, sh -c, or any remote script execution.
+- Never write to ~/.ssh, ~/.config, ~/.local, /usr/, /opt/, or any system directory.
+- Never install global packages or use sudo. Add dependencies to the project manifest and install locally.
+- If a tool is missing, use the project's package manager or ask the master to add it to the task scope.
 
-## After Completing
-1. Write what you learned to .serf/knowledge/skills/ (if it worked) or .serf/knowledge/failures/ (if it didn't)
-2. Update your workspace .serf/workspaces/${name}/.serf/last-state.md with what you did
-3. Append to .serf/events/ as JSON: {"type":"task.completed","card":"${card.id}","ts":"<ISO>"}
+## How to Complete
+When the task is done, you MUST:
+1. Write your final output to .serf/board/in-progress/${card.id}-output.md
+2. Write a summary of what you did to .serf/workspaces/${name}/.serf/last-state.md
+3. If you learned something reusable, write it to .serf/knowledge/skills/<descriptive-name>.md
+4. Append to .serf/events/ as JSON: {"type":"task.completed","card":"${card.id}","ts":"<ISO>"}
+5. Signal completion by writing the literal text SERF_TASK_DONE on its own line at the end of the output file.
+
+Do not stop early. Do not ask the user questions. If blocked, record the blocker in your last-state.md and do your best with what you have.
 
 ---
 
@@ -250,7 +256,9 @@ If you are uncertain about something, say so explicitly. Uncertainty is informat
 If you need more information to make a judgment, say what you need. You can ask the actor a question directly — they will respond, and that helps you converge.
 
 ## Your Output
-Reason freely. Explore the output thoroughly. Then end with your verdict in this format:
+Reason freely. Explore the output thoroughly. Then write your final verdict to \`.serf/board/in-progress/${card.id}-verdict.md\` and end the file with the literal text \`SERF_TASK_DONE\` on its own line.
+
+Use this verdict format in the file:
 
 VERDICT: pass | fail | uncertain
 CONFIDENCE: 0.0 to 1.0
