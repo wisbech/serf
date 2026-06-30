@@ -109,7 +109,7 @@ async function processCard(card: Card, budget: BudgetTracker, model?: string, us
     let cardHarness: HerdrHarness | null = null;
     if (useHerdr) {
       try {
-        cardHarness = await HerdrHarness.create(model, card.title.slice(0, 30));
+        cardHarness = await HerdrHarness.create(model, card.title.slice(0, 30), worktreePath || process.cwd());
       } catch (err) {
         console.log(`  ⚠ herdr harness failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -150,17 +150,18 @@ class HerdrHarness {
     this.critic = critic;
   }
 
-  static async create(model?: string, context?: string): Promise<HerdrHarness> {
+  static async create(model?: string, context?: string, cwd?: string): Promise<HerdrHarness> {
     const config = loadConfig();
     const agentName = config?.agent ?? "claude";
     const agentModel = model || config?.model;
     const criticAgentName = config?.criticAgent ?? agentName;
     const criticModel = config?.criticModel ?? agentModel;
 
-    const folderName = process.cwd().split("/").pop() || "project";
+    const workdir = cwd ?? process.cwd();
+    const folderName = workdir.split("/").pop() || "project";
     const workspaceLabel = context ? `serf - ${folderName} - ${context}` : `serf - ${folderName}`;
 
-    const ws = await herdr.createWorkspace(workspaceLabel, process.cwd());
+    const ws = await herdr.createWorkspace(workspaceLabel, workdir);
     console.log(`  → herdr workspace: ${ws.workspace_id} (${workspaceLabel})`);
 
     const rootPaneId = ws.workspace_id + ":p1";
