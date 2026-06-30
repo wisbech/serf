@@ -3,7 +3,7 @@ import { critique, classifyVerdict, parseVerdict, type CriticVerdict } from "./c
 import { critiqueMultipass, classifyMultipass, type MultiPassVerdict, type Effort, type CuriosityPoint, EFFORT_PASSES, type CritiqueFn } from "./critic_multipass";
 import { readCard, moveCard, writeCard, listCards, type Card } from "./board";
 import { readSerf, listSerfs, createSerf, type SerfIdentity } from "./serf";
-import { renamePane } from "./herdr";
+import { labelPane } from "./herdr";
 import { appendEvent } from "./events";
 import * as herdr from "./herdr";
 import { HerdrAgent } from "./herdr";
@@ -157,17 +157,20 @@ class HerdrHarness {
     const criticAgentName = config?.criticAgent ?? agentName;
     const criticModel = config?.criticModel ?? agentModel;
 
-    const ws = await herdr.createWorkspace("serf-harness", process.cwd());
-    console.log(`  → herdr workspace: ${ws.workspace_id}`);
+    const folderName = process.cwd().split("/").pop() || "project";
+    const workspaceLabel = context ? `serf - ${folderName} - ${context}` : `serf - ${folderName}`;
+
+    const ws = await herdr.createWorkspace(workspaceLabel, process.cwd());
+    console.log(`  → herdr workspace: ${ws.workspace_id} (${workspaceLabel})`);
 
     const rootPaneId = ws.workspace_id + ":p1";
     const actorLabel = context ? `actor:${context}` : "actor";
-    if (context) {
-      try { await herdr.renamePane(rootPaneId, actorLabel); } catch {}
-    }
     await herdr.sendCommand(rootPaneId, `echo "╔══ SERF ACTOR (${agentName}) ${context ? `- ${context}` : ""} ══╗"`);
     await herdr.sendCommand(rootPaneId, herdr.buildAgentCmd(agentName, agentModel));
     await new Promise(r => setTimeout(r, 5000));
+    if (context) {
+      try { await herdr.labelPane(rootPaneId, actorLabel); } catch {}
+    }
     const actor = HerdrAgent.fromExisting(rootPaneId, "actor", agentName, agentModel);
     console.log(`    → Actor ready (${agentName}) ${context ? `| ${context}` : ""}`);
 

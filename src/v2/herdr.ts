@@ -114,27 +114,52 @@ export async function closeWorkspace(workspaceId: string): Promise<boolean> {
 }
 
 export async function renamePane(paneId: string, label: string, retries = 3): Promise<boolean> {
+  let lastErr: unknown;
   for (let i = 0; i < retries; i++) {
     try {
       await send("pane.rename", { pane_id: paneId, label });
+      return true;
+    } catch (err) {
+      lastErr = err;
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  return false;
+}
+
+export async function setPaneTitle(paneId: string, title: string, retries = 3): Promise<boolean> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await send("pane.report_metadata", { pane_id: paneId, source: "serf", title });
       return true;
     } catch {
       await new Promise(r => setTimeout(r, 500));
     }
   }
-  // Fallback: report metadata title
+  return false;
+}
+
+export async function labelPane(paneId: string, text: string): Promise<boolean> {
+  const renamed = await renamePane(paneId, text);
+  const titled = await setPaneTitle(paneId, text);
+  let displayed = false;
   try {
-    await send("pane.report_metadata", { pane_id: paneId, source: "serf", title: label });
-    return true;
+    await send("pane.report_metadata", { pane_id: paneId, source: "serf", display_agent: text });
+    displayed = true;
   } catch {
+    // ignore
+  }
+  if (!renamed && !titled && !displayed) {
+    console.log(`    ⚠ Could not label pane ${paneId} as "${text}"`);
     return false;
   }
+  return true;
 }
 
 export async function splitPane(workspaceId: string, direction: "right" | "down" = "right", label?: string): Promise<PaneInfo> {
   const result = await send("pane.split", { workspace_id: workspaceId, direction });
   if (label && result.pane?.pane_id) {
-    await renamePane(result.pane.pane_id, label).catch(() => {});
+    await labelPane(result.pane.pane_id, label).catch(() => {});
   }
   return result.pane;
 }
@@ -294,12 +319,15 @@ export class HerdrAgent {
     context?: string,
   ): Promise<HerdrAgent> {
     const label = context ? `${role}:${context}` : role;
-    const pane = await splitPane(workspaceId, direction, label);
+    const pane = await splitPane(workspaceId, direction);
     const agent = new HerdrAgent(pane.pane_id, role, agentName, model);
 
     await sendCommand(agent.paneId, `echo "╔══ SERF ${role.toUpperCase()} (${agentName}) ${context ? `- ${context}` : ""} ══╗"`);
     await sendCommand(agent.paneId, buildAgentCmd(agentName, model));
     await new Promise(r => setTimeout(r, 5000));
+    if (label) {
+      try { await labelPane(agent.paneId, label); } catch {}
+    }
     agent.ready = true;
 
     return agent;
