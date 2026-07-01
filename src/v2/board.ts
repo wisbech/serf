@@ -15,6 +15,8 @@ export interface Card {
   column: Column;
   assigned?: string;
   task: string;
+  goal: string;
+  lever: string;
   acceptance: string[];
   context?: string;
   quality?: number;
@@ -65,7 +67,7 @@ export function hasSimilarTask(title: string): Card | null {
   return null;
 }
 
-export function addTask(title: string, task?: string, acceptance?: string[]): Card {
+export function addTask(title: string, task?: string, goal?: string, lever?: string, acceptance?: string[], context?: string): Card {
   ensureBoard();
   const existing = hasSimilarTask(title);
   if (existing) {
@@ -82,12 +84,40 @@ export function addTask(title: string, task?: string, acceptance?: string[]): Ca
     title,
     column: "backlog",
     task: task ?? title,
-    acceptance: acceptance ?? ["GAN critic passes"],
+    goal: goal ?? `Achieve: ${title}`,
+    lever: lever ?? `Implement the changes and verify them with tests or observable output`,
+    acceptance: acceptance ?? ["Source files were edited to implement the change", "Tests pass or verification command succeeds"],
+    context,
     createdAt: now,
     updatedAt: now,
   };
   writeCard(card);
   return card;
+}
+
+export function validateCard(card: Partial<Card>): string[] {
+  const errors: string[] = [];
+  if (!card.title || card.title.trim().length === 0) errors.push("missing title");
+  if (!card.task || card.task.trim().length === 0) errors.push("missing task");
+  if (!card.goal || card.goal.trim().length === 0) errors.push("missing goal: add a single done condition");
+  if (!card.lever || card.lever.trim().length === 0) errors.push("missing lever: add the action/method to use");
+  if (!card.acceptance || card.acceptance.length === 0) {
+    errors.push("missing acceptance criteria");
+  } else {
+    const empty = card.acceptance.filter(a => !a || a.trim().length === 0).length;
+    if (empty > 0) errors.push("acceptance criteria cannot be empty");
+    const weak = card.acceptance.filter(a => {
+      const lower = a.toLowerCase();
+      return lower.includes("looks good") || lower.includes("seems fine") || lower.includes("works");
+    }).length;
+    if (weak > 0 && card.acceptance.length < 3) errors.push("acceptance criteria must be measurable (file paths, test names, output markers)");
+    const nonEmpty = card.acceptance.filter(Boolean) as string[];
+    const hasSourceEvidence = nonEmpty.some(a => /edit|create|add.*file|source file|git diff|implementation/i.test(a));
+    const hasTestEvidence = nonEmpty.some(a => /test|verify|run|pass|command|output/i.test(a));
+    if (!hasSourceEvidence) errors.push("acceptance criteria must include a source-file-change criterion");
+    if (!hasTestEvidence) errors.push("acceptance criteria must include a verification/test criterion");
+  }
+  return errors;
 }
 
 export function writeCard(card: Card): void {
@@ -169,6 +199,12 @@ ${card.assigned ?? "unassigned"}
 ## Task
 ${card.task}
 
+## Goal
+${card.goal}
+
+## Lever
+${card.lever}
+
 ## Acceptance
 ${card.acceptance.map(a => `- ${a}`).join("\n")}
 
@@ -195,6 +231,8 @@ function markdownToCard(raw: string, id: string, column: Column): Card {
   const statusMatch = raw.match(/## Status\n(.+)/m);
   const assignedMatch = raw.match(/## Assigned\n(.+)/m);
   const taskMatch = raw.match(/## Task\n([\s\S]*?)(?=\n## )/m);
+  const goalMatch = raw.match(/## Goal\n([\s\S]*?)(?=\n## )/m);
+  const leverMatch = raw.match(/## Lever\n([\s\S]*?)(?=\n## )/m);
   const acceptanceMatch = raw.match(/## Acceptance\n([\s\S]*?)(?=\n## )/m);
   const contextMatch = raw.match(/## Context\n([\s\S]*?)(?=\n## )/m);
   const qualityMatch = raw.match(/## Quality\n(.+)/m);
@@ -209,9 +247,11 @@ function markdownToCard(raw: string, id: string, column: Column): Card {
     column,
     assigned: assignedMatch?.[1]?.trim() === "unassigned" ? undefined : assignedMatch?.[1]?.trim(),
     task: taskMatch?.[1]?.trim() ?? "",
+    goal: goalMatch?.[1]?.trim() ?? `Achieve: ${titleMatch?.[1]?.trim() ?? id}`,
+    lever: leverMatch?.[1]?.trim() ?? "Implement the changes and verify them with tests or observable output",
     acceptance: acceptanceMatch
       ? acceptanceMatch[1].split("\n").map(l => l.replace(/^-\s*/, "").trim()).filter(Boolean)
-      : ["GAN critic passes"],
+      : ["Source files were edited to implement the change", "Tests pass or verification command succeeds"],
     context: contextMatch?.[1]?.trim() || undefined,
     quality: qualityMatch?.[1]?.trim() === "not scored" ? undefined : parseFloat(qualityMatch?.[1] ?? "0") || undefined,
     feedback: feedbackMatch?.[1]?.trim() === "none" ? null : (feedbackMatch?.[1]?.trim() as "accept" | "refine" | null),

@@ -54,9 +54,18 @@ Success criteria for v1.0.0:
 - No more TUI. The agent's own UI is the interface.
 - No more container isolation plans. Worktrees are enough.
 
-## Phase 1: Harden herdr Mode (2-3 days)
+## Phase 1: Harden herdr Mode + Project-is-Config (in progress)
 
-### 1.0 Package Manager Discipline
+### 1.0 Project is the Config ✅
+
+All serf configuration and state lives in the project's `.serf/` folder. Serf never writes to `~/.serf/`, `~/.config/`, or system paths to configure itself. Capability detection is read-only and reported to the user and the coding agent.
+
+Acceptance:
+- `~/.serf/` removed; config lives in `.serf/config.json`.
+- `~/.config/ghostty/config` restored and untouched by serf.
+- `serf .` initializes and starts in one command.
+
+### 1.1 Package Manager Discipline
 
 The harness must enforce that agents only use project-local package managers. This is a security and reproducibility rule, not just a prompt suggestion.
 

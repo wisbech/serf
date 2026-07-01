@@ -29,24 +29,29 @@ export function buildCritiquePrompt(task: string, output: string, acceptance?: s
 
 You do NOT suggest improvements. You do NOT give partial credit. You ONLY identify failures.
 
+ANTI-CHEAT RULE: If the output only describes what would be done, or only edits .md sidecar files, answer NO for every criterion about source file changes. Summaries and plans are NOT implementation.
+
 TASK:
 ${task}
 
-ACCEPTANCE CRITERIA (each must be individually satisfied):
+ACCEPTANCE CRITERIA (each must be individually satisfied with evidence):
 ${criteriaBlock}
 
 RESPONSE TO EVALUATE:
 ${output.slice(0, 3000)}
 
-For EACH acceptance criterion, answer YES (fully satisfied, with evidence) or NO (not satisfied, with evidence). If a criterion cannot be objectively evaluated from the output alone, answer CANNOT_EVALUATE.
+For EACH acceptance criterion:
+- YES only if the output provides concrete evidence the criterion is met (file paths, test results, command output).
+- NO if the criterion is not met, not evidenced, or the actor only described/planned the work.
+- CANNOT_EVALUATE only if the output lacks enough information but the criterion sounds evaluable.
 
 Respond with EXACTLY this format — no other text:
 
 CRITERION 1: ${criteria[0]}
 ANSWER: YES | NO | CANNOT_EVALUATE
-EVIDENCE: [specific quote or reference from the output]
+EVIDENCE: [specific quote or reference from the output; if NO, say what's missing]
 
-${criteria.length > 1 ? criteria.slice(1).map((c, i) => `CRITERION ${i + 2}: ${c}\nANSWER: YES | NO | CANNOT_EVALUATE\nEVIDENCE: [specific quote or reference from the output]`).join("\n\n") : ""}
+${criteria.length > 1 ? criteria.slice(1).map((c, i) => `CRITERION ${i + 2}: ${c}\nANSWER: YES | NO | CANNOT_EVALUATE\nEVIDENCE: [specific quote or reference from the output; if NO, say what's missing]`).join("\n\n") : ""}
 
 VERDICT: pass | fail
 REASONING: [one sentence: which criteria failed and why]`;

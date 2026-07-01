@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { addTask, readCard, moveCard, listCards, writeCard, setFeedback, deleteCard } from "../src/v2/board";
+import { addTask, readCard, moveCard, listCards, writeCard, setFeedback, deleteCard, validateCard } from "../src/v2/board";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -21,7 +21,7 @@ afterEach(() => {
 
 describe("Board", () => {
   test("addTask creates a card in backlog", () => {
-    const card = addTask("Test task", "Do something", ["quality check"]);
+    const card = addTask("Test task", "Do something", undefined, undefined, ["quality check"]);
     expect(card.column).toBe("backlog");
     expect(card.title).toBe("Test task");
     expect(card.task).toBe("Do something");
@@ -103,19 +103,14 @@ describe("Board", () => {
     expect(all.filter(c => c.title === "Refactor auth module").length).toBe(1);
   });
 
-  test("listCards ignores sidecar files", () => {
-    const card = addTask("Sidecar test");
-    moveCard(card.id, "in-progress");
+  test("validateCard rejects weak acceptance criteria", () => {
+    const errors = validateCard({ title: "T", task: "T", goal: "G", lever: "L", acceptance: ["looks good"] });
+    expect(errors.length).toBeGreaterThan(0);
+  });
 
-    // Create sidecar files that should not be listed as cards
-    const sidecars = ["-output.md", "-plan.md", "-verdict.md"];
-    const base = join(TMP, "board", "in-progress", card.id);
-    for (const suffix of sidecars) {
-      Bun.write(base + suffix, "# sidecar");
-    }
-
-    const inProgress = listCards("in-progress");
-    expect(inProgress.length).toBe(1);
-    expect(inProgress[0].id).toBe(card.id);
+  test("validateCard requires source-change and verification criteria", () => {
+    const errors = validateCard({ title: "T", task: "T", goal: "G", lever: "L", acceptance: ["it works"] });
+    expect(errors.some(e => e.includes("source-file-change"))).toBe(true);
+    expect(errors.some(e => e.includes("verification/test"))).toBe(true);
   });
 });

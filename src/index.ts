@@ -7,13 +7,26 @@ async function main() {
   const cmd = ARGS[0];
   const args = ARGS.slice(1);
 
+  // `serf .` is a shortcut to init-and-start in the current directory.
+  if (cmd === ".") {
+    const { existsSync } = require("node:fs");
+    const { getSerfDir } = require("./v2/paths");
+    if (!existsSync(getSerfDir())) {
+      handleInit();
+    }
+    await handleStart([]);
+    return;
+  }
+
   switch (cmd) {
     case "init":     handleInit(); return;
     case "task":     await handleTask(args); return;
     case "board":    await handleBoard(args); return;
     case "start":    await handleStart(args); return;
+    case "process":  await handleProcess(args); return;
     case "config":   handleConfig(args); return;
     case "agents":   handleAgents(args); return;
+    case "providers": await handleProviders(args); return;
     case "health":   await handleHealth(args); return;
     case "help":
     case "--help":
@@ -29,16 +42,42 @@ async function main() {
 
 // ── INIT ──
 
-function handleInit() {
+async function handleInit() {
   const { existsSync, mkdirSync, writeFileSync } = require("node:fs");
   const { join } = require("node:path");
   const { execSync } = require("node:child_process");
   const { getSerfDir } = require("./v2/paths");
+  const { detectCapabilities, defaultAgentFromCapabilities } = require("./v2/capabilities");
   const dir = getSerfDir();
 
   if (existsSync(dir)) {
     console.log("\n  .serf/ already exists. Use 'serf task' to add work.\n");
     return;
+  }
+
+  // Detect what's actually installed and configure the project for it.
+  const caps = detectCapabilities(process.cwd());
+  const agent = defaultAgentFromCapabilities(caps);
+  const transport = caps.herdr ? "herdr" : "direct";
+
+  let provider = "unknown";
+  let model = "claude-sonnet-4-20250514";
+  let backend = "anthropic";
+
+  try {
+    const { detectProviders, preferredProvider, defaultModelForProvider } = require("./v2/providers");
+    const providers = await detectProviders();
+    const best = preferredProvider(providers);
+    if (best) {
+      provider = best.name;
+      model = defaultModelForProvider(best.name);
+      if (best.models && best.models.length > 0) {
+        model = best.preferredLocal ? `ollama/${best.models[0]}` : best.models[0];
+      }
+      backend = provider === "ollama" || provider === "vllm" ? "local" : provider;
+    }
+  } catch (err) {
+    // provider detection is best-effort; fall back to agent-based defaults
   }
 
   mkdirSync(join(dir, "board", "backlog"), { recursive: true });
@@ -56,6 +95,37 @@ function handleInit() {
   mkdirSync(join(dir, "workspaces", "critic", ".serf", "verdicts"), { recursive: true });
 
   writeFileSync(join(dir, "plan.md"), "# Plan\n\nThe mission and current direction.\n");
+
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    agent,
+    model,
+    backend,
+    provider,
+    terminal: "auto",
+    transport,
+  }, null, 2) + "\n");
+
+  writeFileSync(join(dir, "serfs", "master.md"), `# master
+
+## Mission
+Orchestrate the dark factory. Survey the project, talk with the user, write tasks, spawn serfs, ensure convergence.
+
+## Persona
+Clear, strategic, autonomous. Asks good questions. Writes evaluable goals and levers.
+
+## Lever
+- .serf/ folder (board, knowledge, identities, events)
+- User conversation
+- callLLM for classification and planning
+
+## Measurement
+- Tasks written per session: >0
+- Tasks that pass critic: >70%
+- User refinement rate: <30%
+
+## Fate
+If the factory is confusing, my protocol is wrong, not me.
+`);
 
   writeFileSync(join(dir, "serfs", "actor.md"), `# actor
 
@@ -107,10 +177,30 @@ If I keep passing bad work, I'm not adversarial enough. If I keep failing good w
   console.log("    ├── events/         (audit trail)");
   console.log("    └── plan.md         (edit this with your mission)");
 
-  // Check for coding agents and offer herdr integration setup
-  checkIntegrations();
+  console.log("\n  Detected capabilities:");
+  const { printCapabilities } = require("./v2/capabilities");
+  printCapabilities(caps);
 
-  console.log("\n  Next: serf start  (launches your coding agent as the master serf)");
+  try {
+    const { detectProviders, providerInstructions } = require("./v2/providers");
+    const providers = await detectProviders();
+    const available = providers.filter((p: any) => p.reachability === "available" || p.reachability === "needs-auth");
+    console.log("\n  Providers:");
+    for (const p of available) {
+      const marker = p.reachability === "available" ? "✓" : "⚠";
+      console.log(`    ${marker} ${p.label} — ${p.error || "ready"}`);
+    }
+    if (provider !== "unknown") {
+      console.log(`  Selected provider: ${provider} (${model})`);
+    } else {
+      console.log("  No provider detected.");
+      console.log(`  ${providerInstructions("unknown")}`);
+    }
+  } catch (err) {
+    // provider detection is best-effort
+  }
+
+  console.log("\n  Next: serf .      (or: serf start)");
   console.log("  Or:   serf task \"do something\"  (add a task directly)\n");
 }
 
@@ -195,12 +285,48 @@ async function handleTask(args: string[]) {
     console.log("Usage: serf task \"do something\"");
     process.exit(1);
   }
-  const { addTask } = await import("./v2/board");
+  const { addTask, validateCard } = await import("./v2/board");
   const title = args.join(" ");
-  const card = addTask(title);
+
+  // Generate deterministic Goal, Lever, Acceptance from the title.
+  const goal = `Achieve: ${title}`;
+  const lever = `Edit source files and add/update tests to implement and verify the change`;
+  const acceptance = generateAcceptance(title);
+
+  const card = addTask(title, title, goal, lever, acceptance);
+  const errors = validateCard(card);
+  if (errors.length > 0) {
+    console.log(`\n  ⚠ Card created with warnings: ${errors.join("; ")}\n`);
+  }
   console.log(`\n  ✓ Task added to backlog: ${card.id}`);
-  console.log(`    "${title}"\n`);
-  console.log(`  Run: serf start  to begin processing\n`);
+  console.log(`    "${title}"`);
+  console.log(`    Goal: ${card.goal}`);
+  console.log(`    Lever: ${card.lever}`);
+  console.log(`    Acceptance:`);
+  for (const a of card.acceptance) console.log(`      - ${a}`);
+  console.log(`\n  Run: serf start  to begin processing\n`);
+}
+
+function generateAcceptance(title: string): string[] {
+  const lower = title.toLowerCase();
+  const criteria: string[] = [
+    `Source files were edited to implement: ${title}`,
+    `The actor ran a verification command (test, build, lint, or typecheck) and reported the output`,
+    `Output file .serf/board/in-progress/<id>-output.md contains evidence of actual file edits and ends with SERF_TASK_DONE`,
+  ];
+  if (lower.includes("test") || lower.includes("tests")) {
+    criteria.push("A new or updated test exists and passes");
+  }
+  if (lower.includes("fix") || lower.includes("bug")) {
+    criteria.push("The bug is reproduced by a failing test before the fix and passes after");
+  }
+  if (lower.includes("add") || lower.includes("new")) {
+    criteria.push("New functionality is reachable from the CLI or public API");
+  }
+  if (lower.includes("doc") || lower.includes("readme")) {
+    criteria.push("Documentation file was edited and is readable");
+  }
+  return criteria;
 }
 
 // ── BOARD ──
@@ -260,6 +386,7 @@ async function handleBoard(args: string[]) {
 
 async function handleStart(args: string[]) {
   const { startMaster } = await import("./v2/master");
+  const { loadConfig, saveConfig } = require("./state");
   const budgetFlag = args.indexOf("--budget");
   const budgetLimit = budgetFlag >= 0 ? parseInt(args[budgetFlag + 1], 10) : undefined;
   const modelFlag = args.indexOf("--model");
@@ -269,12 +396,23 @@ async function handleStart(args: string[]) {
   const onceFlag = args.includes("--once");
 
   if (agent) {
-    const { loadConfig, saveConfig } = require("./state");
-    const config = loadConfig() ?? { transport: "pi", model: "qwen3.5", backend: "ollama" };
+    const config = loadConfig();
     config.agent = agent;
     saveConfig(config);
   }
 
+  await startMaster({ budgetLimit, model, once: onceFlag });
+}
+
+// ── PROCESS ──
+
+async function handleProcess(args: string[]) {
+  const { startMaster } = await import("./v2/master");
+  const budgetFlag = args.indexOf("--budget");
+  const budgetLimit = budgetFlag >= 0 ? parseInt(args[budgetFlag + 1], 10) : undefined;
+  const modelFlag = args.indexOf("--model");
+  const model = modelFlag >= 0 ? args[modelFlag + 1] : undefined;
+  const onceFlag = args.includes("--once");
   await startMaster({ budgetLimit, model, once: onceFlag });
 }
 
@@ -317,6 +455,50 @@ async function handleDefault() {
   await handleBoard([]);
 }
 
+// ── PROVIDERS ──
+
+async function handleProviders(args: string[]) {
+  const { detectProviders, providerInstructions } = require("./v2/providers");
+  const providers = await detectProviders();
+
+  console.log("\n  Available providers:");
+  for (const p of providers) {
+    const marker = p.reachability === "available" ? "✓" : p.reachability === "needs-auth" ? "⚠" : "✗";
+    const detail = p.error ? ` — ${p.error}` : "";
+    const models = p.models ? ` (${p.models.slice(0, 3).join(", ")}${p.models.length > 3 ? ", ..." : ""})` : "";
+    console.log(`    ${marker} ${p.label}${models}${detail}`);
+  }
+
+  if (args[0] === "set" && args[1]) {
+    const { loadConfig, saveConfig } = require("./state");
+    const { defaultModelForProvider } = require("./v2/providers");
+    const provider = args[1];
+    const config = loadConfig();
+    config.provider = provider;
+    config.model = args[2] || defaultModelForProvider(provider);
+    config.backend = provider === "ollama" || provider === "vllm" ? "local" : provider;
+    saveConfig(config);
+    console.log(`\n  ✓ provider = ${provider}`);
+    console.log(`    model = ${config.model}`);
+    console.log("");
+    return;
+  }
+
+  if (args[0] === "help" || args[0] === "instructions") {
+    for (const p of providers) {
+      console.log(`\n  ${p.label}`);
+      console.log(`    ${providerInstructions(p.name)}`);
+    }
+    console.log("");
+    return;
+  }
+
+  console.log("\n  Usage:");
+  console.log("    serf providers              list detected providers");
+  console.log("    serf providers set ollama   set project provider");
+  console.log("    serf providers instructions show setup help\n");
+}
+
 // ── CONFIG ──
 
 function handleConfig(args: string[]) {
@@ -324,11 +506,7 @@ function handleConfig(args: string[]) {
 
   if (args.length === 0 || args[0] === "show") {
     const config = loadConfig();
-    if (!config) {
-      console.log("\n  No config found. Run: serf config set agent claude\n");
-      return;
-    }
-    console.log("\n  Serf Config (~/.serf/config.json):");
+    console.log("\n  Serf Config (.serf/config.json):");
     console.log(JSON.stringify(config, null, 2));
     console.log("");
     return;
@@ -339,10 +517,10 @@ function handleConfig(args: string[]) {
     const value = args[2];
     if (!key || value === undefined) {
       console.log("Usage: serf config set <key> <value>");
-      console.log("Keys: agent, terminal, model, backend, transport");
+      console.log("Keys: agent, terminal, model, backend, transport, provider, endpoint, apiKey");
       process.exit(1);
     }
-    const config = loadConfig() ?? { transport: "pi", model: "qwen3.5", backend: "ollama" };
+    const config = loadConfig();
     config[key] = value;
     saveConfig(config);
     console.log(`\n  ✓ ${key} = ${value}\n`);
@@ -384,7 +562,7 @@ function handleAgents(args: string[]) {
       console.log(`Unknown agent: ${agent}. Run: serf agents list`);
       process.exit(1);
     }
-    const config = loadConfig() ?? { transport: "pi", model: "qwen3.5", backend: "ollama" };
+    const config = loadConfig();
     config.agent = agent;
     saveConfig(config);
     console.log(`\n  ✓ Agent set to: ${agent}\n`);
@@ -401,21 +579,39 @@ function printHelp() {
 SERF — dark factory for coding agents
 
 USAGE:
+  serf .                             Init (if needed) and start in current project
+  serf .                             Init (if needed) and start in current project
   serf init                          Create .serf/ in current project
   serf task "do something"           Add a task to the board
-  serf start                          Launch master agent — surveys project, talks with you, processes tasks
+  serf start                         Launch master agent — surveys project, talks with you, processes tasks
+  serf process [--once] [--budget N] Run the board loop in headless mode
   serf board                         Show the kanban board
   serf agents [list|use <name>]      List or select coding agent
+  serf providers [set <name>]        List or set LLM provider
   serf config [show|set <k> <v>]     Show or set config
   serf health [--gan] [--strict]     Run build + test + typecheck (+ GAN)
   serf board move <id> <column>      Move a card between columns
 
+PROVIDERS:
+  serf supports any LLM backend you can reach:
+  - Ollama (local):      ollama pull <model>; ollama serve
+  - vLLM / OpenAI-proxy: start server; serf config set endpoint http://localhost:8000/v1
+  - Anthropic API:       ANTHROPIC_API_KEY=... serf config set provider anthropic
+  - OpenAI:              OPENAI_API_KEY=... serf config set provider openai
+  - Claude Code CLI:       claude /login; serf config set agent claude
+  - Claude Desktop:      use an MCP server to expose it to serf
+
+  The project config (.serf/config.json) holds provider, model, endpoint, apiKey.
+  Serf picks the best available provider during init if none is configured.
+
 INTERACTIVE MODE:
-  serf start                          The default way to use serf. Launches your coding
-                                     agent as the master serf. It surveys the project,
-                                     shows you what's going on, discusses what to work
-                                     on, writes the task to the board, and processes it.
-                                     After each task it asks "what's next?"
+  serf .                             The default way to use serf. Initialize if needed, then launch
+                                     your coding agent as the master serf. It surveys the project,
+                                     shows you what's going on, discusses what to work on, writes the
+                                     task to the board, and processes it. After each task it asks
+                                     "what's next?"
+
+  serf start                         Same as above, but only starts (does not init).
 
 AGENTS:
   claude, opencode, aider, pi, hermes, codex (headless — run in terminal, capture output)
@@ -426,7 +622,7 @@ THE PROTOCOL:
   The agent reads the board, picks up a task, executes, critiques, writes result.
 
 CONFIGURATION:
-  ~/.serf/config.json — global config (agent, terminal, model, backend)
+  .serf/config.json — project-local config (agent, terminal, model, backend, provider, endpoint, apiKey)
   .serf/plan.md — project mission and direction
   .serf/serfs/ — serf identities (mission/persona/lever/measurement/fate)
   .serf/workspaces/ — per-agent private state (last-state, context, calibration)

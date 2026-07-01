@@ -156,4 +156,21 @@ REASONING: Failed 1 of 3.`;
     expect(prompt).toContain("Build a landing page");
     expect(prompt).toContain("Step 1: Research");
   });
+
+  test("buildCritiquePrompt warns about summary-only output", () => {
+    const prompt = buildCritiquePrompt("Refactor auth", "I will refactor the auth module.", ["Source files were edited"]);
+    expect(prompt).toContain("ANTI-CHEAT");
+    expect(prompt).toContain("Summaries and plans are NOT implementation");
+  });
+
+  test("parseVerdict treats all-CANNOT_EVALUATE evidence as fail even if output is a summary", () => {
+    const raw = `CRITERION 1: Source files were edited
+ANSWER: CANNOT_EVALUATE
+EVIDENCE: no file paths or diff shown
+
+VERDICT: fail
+REASONING: Cannot verify source edits.`;
+    const v = parseVerdict(raw);
+    expect(v.verdict).toBe("fail");
+  });
 });

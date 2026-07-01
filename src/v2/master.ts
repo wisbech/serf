@@ -119,7 +119,7 @@ async function processCard(card: Card, budget: BudgetTracker, model?: string, us
 
     if (useHerdr && cardHarness) {
       try {
-        result = await processWithHerdr(card, budget, cardHarness);
+        result = await processWithHerdr(card, budget, cardHarness, worktreePath || undefined);
       } catch (err) {
         console.log(`  ⚠ herdr failed: ${err instanceof Error ? err.message : String(err)}`);
         moveCard(card.id, "review");
@@ -194,11 +194,16 @@ class HerdrHarness {
 
 // ── HERDR MODE ──
 
-async function processWithHerdr(card: Card, budget: BudgetTracker, harness: HerdrHarness): Promise<"done" | "review"> {
+async function processWithHerdr(card: Card, budget: BudgetTracker, harness: HerdrHarness, worktreePath?: string): Promise<"done" | "review"> {
   const { actor, critic, workspaceId } = harness;
 
   let attempt = 0;
   let lastFeedback = "";
+
+  // The actor/critic run inside a git worktree when available. They write their
+  // completion files to the worktree's .serf/board/in-progress/ directory, not
+  // the main repo's .serf/. Watch the correct path so we don't time out.
+  const serfBase = worktreePath ? join(worktreePath, ".serf") : getSerfDir();
 
   while (attempt < MAX_RETRIES) {
     attempt++;
@@ -209,11 +214,11 @@ async function processWithHerdr(card: Card, budget: BudgetTracker, harness: Herd
     await actor.send(prompt);
     console.log(`    → Attempt ${attempt}: actor working...`);
 
-    const outputPath = join(getSerfDir(), "board", "in-progress", `${card.id}-output.md`);
+    const outputPath = join(serfBase, "board", "in-progress", `${card.id}-output.md`);
     const output = await actor.waitForDone(outputPath, 600_000);
     console.log(`    → ${output.length} chars\n`);
 
-    const { verdict: mpv } = await critiqueWithHerdr(card, output, critic, actor, attempt);
+    const { verdict: mpv } = await critiqueWithHerdr(card, output, critic, actor, attempt, serfBase);
     printMultipassCritic(mpv);
 
     appendEvent("critic.verdict", {
@@ -264,6 +269,7 @@ async function critiqueWithHerdr(
   critic: HerdrAgent | null,
   actor: HerdrAgent,
   attempt: number,
+  serfBase: string,
 ): Promise<{ verdict: MultiPassVerdict; results: any[] }> {
   if (!critic) {
     return critiqueMultipass(card.task, output, card.acceptance);
@@ -273,7 +279,7 @@ async function critiqueWithHerdr(
   await critic.send(criticPrompt);
   console.log(`    → Critic evaluating...`);
 
-  const verdictPath = join(getSerfDir(), "board", "in-progress", `${card.id}-verdict.md`);
+  const verdictPath = join(serfBase, "board", "in-progress", `${card.id}-verdict.md`);
   let criticOutput = await critic.waitForDone(verdictPath, 600_000);
   let criticVerdict = parseVerdict(criticOutput);
 
@@ -307,7 +313,7 @@ async function critiqueWithHerdr(
     });
 
     const resolvePrompt = buildCriticResolvePrompt(actorResponse);
-    criticOutput = await critic.ask(resolvePrompt, verdictPath, 300_000);
+    criticOutput = await critic.ask(resolvePrompt, verdictPath, 300_000); // verdictPath already uses serfBase
     criticVerdict = parseVerdict(criticOutput);
 
     appendEvent("critic.pane.verdict", {

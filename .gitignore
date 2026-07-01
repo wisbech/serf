@@ -2,6 +2,8 @@ node_modules/
 dist/
 .DS_Store
 .serf/
+.serf/worktrees/
+.serf/workspaces/*/
 *.bak
 /tmp/MEMORY/
 test_icm/

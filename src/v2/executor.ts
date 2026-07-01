@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, execSync } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
+import { createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../state";
@@ -30,7 +31,7 @@ const AGENTS: Record<string, AgentSpec> = {
   opencode: {
     name: "opencode",
     command: "opencode",
-    args: (promptFile, _cwd) => ["run", "$(cat '" + promptFile + "')"],
+    args: (promptFile, _cwd) => ["run"],
     headless: true,
   },
   aider: {
@@ -165,7 +166,10 @@ export function buildAgentPrompt(card: Card, serf: SerfIdentity, feedback: strin
   let prompt = `You are ${name} in a dark factory.
 
 ## Your Role
-Execute the task. Read the .serf/ folder to understand context. Do the work. Write results.
+Execute the task. Read the .serf/ folder to understand context. DO THE WORK — edit real source files. Writing a summary is NOT doing the work.
+
+## Anti-Cheat Rule
+Writing this output file is NOT the task. The task is the actual change in the project files. If you only describe what you would do, or only edit .md sidecar files, the critic will FAIL you.
 
 ## Before You Execute — Write a Plan
 Write a step-by-step plan to .serf/board/in-progress/${card.id}-plan.md. Reference the acceptance criteria. If a step is risky or uncertain, say so. The critic will read this plan. If you've already written one (check for the file), skip this and execute.
@@ -197,20 +201,28 @@ The critic can read your workspace for transparency — this helps it understand
 
 ## How to Complete
 When the task is done, you MUST:
-1. Write your final output to .serf/board/in-progress/${card.id}-output.md
-2. Write a summary of what you did to .serf/workspaces/${name}/.serf/last-state.md
-3. If you learned something reusable, write it to .serf/knowledge/skills/<descriptive-name>.md
-4. Append to .serf/events/ as JSON: {"type":"task.completed","card":"${card.id}","ts":"<ISO>"}
-5. Signal completion by writing the literal text SERF_TASK_DONE on its own line at the end of the output file.
+1. EDIT the actual source files to implement the change.
+2. RUN tests or verification commands and ensure they pass.
+3. Write your final output to .serf/board/in-progress/${card.id}-output.md, including evidence: which files changed, which tests ran, what the verification command output was.
+4. Write a summary of what you did to .serf/workspaces/${name}/.serf/last-state.md.
+5. If you learned something reusable, write it to .serf/knowledge/skills/<descriptive-name>.md.
+6. Append to .serf/events/ as JSON: {"type":"task.completed","card":"${card.id}","ts":"<ISO>"}.
+7. Signal completion by writing the literal text SERF_TASK_DONE on its own line at the end of the output file.
 
 Do not stop early. Do not ask the user questions. If blocked, record the blocker in your last-state.md and do your best with what you have.
 
 ---
 
+GOAL:
+${card.goal}
+
+LEVER:
+${card.lever}
+
 TASK:
 ${card.task}
 
-ACCEPTANCE CRITERIA:
+ACCEPTANCE CRITERIA — you must satisfy ALL of these with verifiable evidence:
 ${card.acceptance.map(a => `- ${a}`).join("\n")}`;
 
   if (card.context) {
@@ -249,34 +261,44 @@ Your private state is at .serf/workspaces/critic/.serf/. Write your verdicts and
 - verdicts/ — your verdict log
 
 ## Your Job
-Evaluate the actor's output against the task and its acceptance criteria. Explore adversarially — search for divergences between what was requested and what was delivered. But also explore curiously — notice where you are uncertain, where criteria are close to satisfied, where you can't tell.
+Evaluate the actor's output against the task and its acceptance criteria. Be adversarial — if the actor only wrote a summary or edited sidecar .md files instead of real source files, FAIL them. The actor must produce verifiable changes in the project.
 
-If you are uncertain about something, say so explicitly. Uncertainty is information — it tells the system where to focus attention. If a criterion is almost satisfied but not quite, name the gap. If you see a recurring pattern across evaluations, name it — that's a system-level signal.
+For each acceptance criterion, demand evidence:
+- If it says "source files were edited", check git diff or file contents and cite the file paths.
+- If it says "tests pass", verify the test command was run and cite the result.
+- If it says "documentation file was edited", verify the file changed.
 
-If you need more information to make a judgment, say what you need. You can ask the actor a question directly — they will respond, and that helps you converge.
+A claim without evidence is NOT a satisfied criterion. A plan or description is NOT implementation.
+
+If you are uncertain about something, say so explicitly. "uncertain" means borderline and needs user/actor input — use it sparingly.
 
 ## Your Output
-Reason freely. Explore the output thoroughly. Then write your final verdict to \`.serf/board/in-progress/${card.id}-verdict.md\` and end the file with the literal text \`SERF_TASK_DONE\` on its own line.
+Write your final verdict to \`.serf/board/in-progress/${card.id}-verdict.md\` and end the file with \`SERF_TASK_DONE\`.
 
-Use this verdict format in the file:
+Verdict format:
 
 VERDICT: pass | fail | uncertain
 CONFIDENCE: 0.0 to 1.0
-CURIOSITY: [list criteria or areas where you are uncertain — these become curiosity points]
-REASONING: [your overall judgment in 1-2 sentences]
-
-"uncertain" means you cannot converge — the output is borderline and you need either the actor to clarify or the user to decide. Use it sparingly.
+CURIOSITY: [areas where you are uncertain]
+REASONING: [overall judgment with specific evidence or missing evidence]
 
 ---
+
+GOAL:
+${card.goal}
+
+LEVER:
+${card.lever}
 
 TASK:
 ${card.task}
 
-ACCEPTANCE CRITERIA:
+ACCEPTANCE CRITERIA — demand evidence for each:
 ${card.acceptance.map((a, i) => `${i + 1}. ${a}`).join("\n")}
 
 OUTPUT TO EVALUATE:
-${output}`;
+${output}
+`;
 }
 
 export function buildCriticFollowupPrompt(criticQuestion: string): string {
@@ -308,7 +330,8 @@ export async function spawnAgent(
 ): Promise<ExecResult> {
   const config = loadConfig();
   const agentName = opts.agent ?? config?.agent ?? "claude";
-  const terminal = opts.terminal ?? config?.terminal ?? "ghostty";
+  let terminal = opts.terminal ?? config?.terminal ?? "ghostty";
+  if (terminal === "auto") terminal = "fallback";
   const cwd = opts.cwd ?? process.cwd();
   const timeoutMs = opts.timeoutMs ?? 600_000;
   const model = opts.model ?? opts.serf?.model ?? config?.model;
@@ -337,23 +360,27 @@ export async function spawnAgent(
   }
 }
 
-function buildAgentArgs(spec: AgentSpec, promptFile: string, model?: string): string {
-  const modelFlag = model ? `--model ${model}` : "";
+function buildAgentArgs(spec: AgentSpec, promptFile: string, model?: string): string[] {
   switch (spec.name) {
     case "claude":
-      return `--print "$(cat '${promptFile}')" ${modelFlag}`;
-    case "opencode":
-      return `run "$(cat '${promptFile}')" ${modelFlag ? `-m ${model}` : ""}`;
-    case "aider":
-      return `--message "$(cat '${promptFile}')" --yes-always ${modelFlag}`;
+      return ["--print", readFileSync(promptFile, "utf-8")];
+    case "opencode": {
+      const args: string[] = ["run"];
+      if (model) args.push("--model", model);
+      return args;
+    }
     case "pi":
-      return `--print "$(cat '${promptFile}')" ${modelFlag}`;
+      return ["--print", readFileSync(promptFile, "utf-8")];
+    case "aider":
+      return ["--message", readFileSync(promptFile, "utf-8"), "--yes-always"];
+    case "pi":
+      return ["--print", readFileSync(promptFile, "utf-8")];
     case "hermes":
-      return `chat -q "$(cat '${promptFile}')" -Q ${model ? `-m ${model}` : ""}`;
+      return ["chat", "-q", readFileSync(promptFile, "utf-8"), "-Q"];
     case "codex":
-      return `--print "$(cat '${promptFile}')" ${modelFlag}`;
+      return ["--print", readFileSync(promptFile, "utf-8")];
     default:
-      return spec.args(promptFile, "").join(" ");
+      return spec.args(promptFile, "");
   }
 }
 
@@ -371,12 +398,25 @@ async function runHeadless(
   const promptContent = readFileSync(promptFile, "utf-8");
   const escapedPrompt = promptContent.replace(/'/g, "'\\''");
 
-  // Build agent args based on the spec — read prompt from file at runtime
-  const agentArgs = buildAgentArgs(spec, promptFile, model);
-  const script = `#!/bin/zsh
+  // For opencode, feed the prompt via stdin heredoc. The heredoc body must come
+  // after the command line, not on the same line as the terminator, or bash/zsh
+  // will treat the pipe/redirect as part of the heredoc content instead.
+  const baseArgs = buildAgentArgs(spec, promptFile, model)
+    .map(a => JSON.stringify(a))
+    .join(" ");
+
+  const script = spec.name === "opencode"
+    ? `#!/bin/bash
 cd "${cwd}"
-${spec.command} ${agentArgs} 2>&1 | tee '${outputFile}'
-echo "SERF_DONE_EXIT_CODE=$?" >> '${outputFile}'
+${JSON.stringify(spec.command)} ${baseArgs} <<'PROMPT' 2>&1 | tee "${outputFile}"
+${escapedPrompt}
+PROMPT
+echo "SERF_DONE_EXIT_CODE=$?" >> "${outputFile}"
+`
+    : `#!/bin/zsh
+cd "${cwd}"
+${JSON.stringify(spec.command)} ${baseArgs} 2>&1 | tee "${outputFile}"
+echo "SERF_DONE_EXIT_CODE=$?" >> "${outputFile}"
 `;
 
   writeFileSync(wrapperScript, script);
@@ -490,11 +530,18 @@ function launchInTerminal(terminal: string, scriptPath: string): ChildProcess | 
     });
   }
 
-  // Fallback: run in background
-  return spawn("bash", [scriptPath], {
+  // Fallback: run in background, but keep stdio connected to a log file so we
+  // can diagnose failures and the process is not silently killed by macOS.
+  const logFile = `${scriptPath}.log`;
+  const child = spawn("bash", [scriptPath], {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  const log = createWriteStream(logFile);
+  child.stdout?.pipe(log);
+  child.stderr?.pipe(log);
+  child.unref();
+  return child;
 }
 
 async function waitForOutputFile(
