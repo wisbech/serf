@@ -189,6 +189,64 @@ function parseOutput(raw: string): { output: string; ok: boolean } {
   return { output: cleanOutput, ok: cleanOutput.length > 0 && exitCode === 0 };
 }
 
+async function waitForPaneIdle(paneId: string, outputFile: string, timeoutMs: number): Promise<string> {
+  const markers = ["SERF_TASK_DONE", "SERF_DONE_EXIT_CODE", "FAILURE_REASON"];
+  const startTime = Date.now();
+  const IDLE_THRESHOLD_MS = 15_000;
+  const POLL_INTERVAL_MS = 5_000;
+
+  let lastWorkingTime = Date.now();
+  let wasWorking = false;
+
+  while (Date.now() - startTime < timeoutMs) {
+    if (existsSync(outputFile)) {
+      const content = readFileSync(outputFile, "utf-8");
+      if (markers.some((m) => content.includes(m))) {
+        return content;
+      }
+    }
+
+    try {
+      const pane = await herdr.getPane(paneId);
+      const state = pane?.agent_status ?? "unknown";
+
+      if (state === "working") {
+        wasWorking = true;
+        lastWorkingTime = Date.now();
+      } else if (state === "idle" || state === "done") {
+        if (wasWorking && Date.now() - lastWorkingTime > IDLE_THRESHOLD_MS) {
+          console.log(`  → Agent went idle. Reading pane content...`);
+          const content = await herdr.readPane(paneId, 200);
+          if (content && content.length > 0) {
+            if (existsSync(outputFile)) {
+              const fileContent = readFileSync(outputFile, "utf-8");
+              if (fileContent.length > 0) return fileContent;
+            }
+            return content;
+          }
+          if (existsSync(outputFile)) {
+            return readFileSync(outputFile, "utf-8");
+          }
+          return content || "";
+        }
+      }
+    } catch {}
+
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+
+  if (existsSync(outputFile)) {
+    return readFileSync(outputFile, "utf-8");
+  }
+
+  try {
+    const content = await herdr.readPane(paneId, 200);
+    return content || "";
+  } catch {
+    return "";
+  }
+}
+
 function launchInTerminal(terminal: string, scriptPath: string): ChildProcess | null {
   if (terminal === "ghostty") {
     return spawn("open", ["-na", "Ghostty.app", "--args", "-e", scriptPath], {
@@ -295,15 +353,21 @@ export class HerdrTransport implements Transport {
     const invocation = buildInteractiveInvocation(agentName, model);
 
     if (!this.paneId) {
+      const label = opts.label ?? "serf";
+      let pane: any;
       if (this.serfTabId) {
-        const label = opts.label ?? "serf";
-        const pane = await herdr.splitPaneInTab(this.serfTabId, "right", label);
-        this.paneId = pane.pane_id;
+        pane = await herdr.splitPaneInTab(this.serfTabId, "right", label);
       } else {
-        const label = opts.label ?? "serf";
-        const pane = await herdr.splitPane(this.workspaceId, "right", label);
-        this.paneId = pane.pane_id;
+        const tabs = await herdr.send("tab.list", { workspace_id: this.workspaceId }).catch(() => null);
+        const serfsTab = tabs?.tabs?.find((t: any) => t.label === "serfs");
+        if (serfsTab) {
+          pane = await herdr.splitPaneInTab(serfsTab.tab_id, "right", label);
+        } else {
+          const newTab = await herdr.createTab(this.workspaceId, "serfs", opts.cwd);
+          pane = await herdr.splitPaneInTab(newTab.tab_id, "right", label);
+        }
       }
+      this.paneId = pane.pane_id;
     }
 
     const promptFile = join(serfTmp(), `prompt-${Date.now()}.md`);
@@ -322,7 +386,7 @@ export class HerdrTransport implements Transport {
 
     await herdr.sendCommand(this.paneId, `Read ${promptFile} and follow the instructions. Write your output to ${opts.outputFile} and end with SERF_TASK_DONE.`);
 
-    const raw = await waitForOutputFile(opts.outputFile, opts.timeoutMs, "SERF_TASK_DONE", this.paneId);
+    const raw = await waitForPaneIdle(this.paneId, opts.outputFile, opts.timeoutMs);
 
     try { unlinkSync(promptFile); } catch {}
 
@@ -351,26 +415,6 @@ export interface ConversationResult {
   ok: boolean;
   cardsWritten: number;
   output: string;
-}
-
-/**
- * Tracks the mtime of master-proposal.md and reports whether it has been
- * written/updated since the last check. Used to kick the critic to review a
- * fresh proposal, since the critic is an interactive agent that only acts on
- * terminal input and does not watch the filesystem.
- */
-export function makeProposalKicker(proposalFile: string) {
-  let lastMtime = 0;
-  try { lastMtime = existsSync(proposalFile) ? statSync(proposalFile).mtimeMs : 0; } catch {}
-  return function shouldKick(): boolean {
-    let mtime = 0;
-    try { mtime = existsSync(proposalFile) ? statSync(proposalFile).mtimeMs : 0; } catch {}
-    if (mtime > 0 && mtime !== lastMtime) {
-      lastMtime = mtime;
-      return true;
-    }
-    return false;
-  };
 }
 
 export async function launchInteractiveMasterConversation(
@@ -417,19 +461,50 @@ export async function launchInteractiveMasterConversation(
 
     await new Promise((r) => setTimeout(r, 10_000));
 
-    await herdr.sendCommand(opts.rootPaneId, `Read ${masterPromptFile} and follow those instructions. When you're ready, write tasks to the board. Keep running — the harness will pick up cards as you write them.`);
-    await herdr.sendCommand(criticPaneId, `Read ${criticPromptFile} and follow those instructions.`);
+    await herdr.sendCommand(opts.rootPaneId, `Read ${masterPromptFile} and follow those instructions. When you write or update .serf/tmp/master-proposal.md, the harness will automatically notify the critic. Keep running — the harness will pick up cards as you write them.`);
+    await herdr.sendCommand(criticPaneId, `Read ${criticPromptFile} and follow those instructions. The harness will send you proposals when they are ready.`);
 
     console.log(`  → Master launched in left pane, critic in right pane.`);
-    console.log(`  → Master writes cards, harness picks them up immediately.`);
+    console.log(`  → Event-driven loop: master writes proposal → harness kicks critic → critic writes critique → harness notifies master.`);
     console.log(`  → Talk to either pane. Exit both agents when done.\n`);
 
     const { listCards } = await import("./board");
+    const { appendEvent, subscribeFromFile } = await import("./events");
     let cardsAtStart = listCards("backlog").length;
 
-    const backlogDir = join(getSerfDir(), "board", "backlog");
     const proposalFile = join(serfTmp(), "master-proposal.md");
-    const shouldKickCritic = makeProposalKicker(proposalFile);
+    const critiqueFile = join(serfTmp(), "critique.md");
+    let lastProposalMtime = 0;
+    let lastCritiqueMtime = 0;
+    try { lastProposalMtime = existsSync(proposalFile) ? statSync(proposalFile).mtimeMs : 0; } catch {}
+    try { lastCritiqueMtime = existsSync(critiqueFile) ? statSync(critiqueFile).mtimeMs : 0; } catch {}
+
+    const pollInterval = setInterval(async () => {
+      let proposalMtime = 0;
+      let critiqueMtime = 0;
+      try { proposalMtime = existsSync(proposalFile) ? statSync(proposalFile).mtimeMs : 0; } catch {}
+      try { critiqueMtime = existsSync(critiqueFile) ? statSync(critiqueFile).mtimeMs : 0; } catch {}
+
+      if (proposalMtime > 0 && proposalMtime !== lastProposalMtime) {
+        lastProposalMtime = proposalMtime;
+        appendEvent("proposal.written", { file: proposalFile, mtime: proposalMtime });
+        console.log(`  → proposal.written event — kicking critic to review...`);
+        herdr.sendCommand(
+          criticPaneId,
+          `Read ${proposalFile} and write your evaluation to ${critiqueFile}. Be adversarial. End with SERF_CRITIQUE_DONE.`,
+        ).catch(() => {});
+      }
+
+      if (critiqueMtime > 0 && critiqueMtime !== lastCritiqueMtime) {
+        lastCritiqueMtime = critiqueMtime;
+        appendEvent("critique.written", { file: critiqueFile, mtime: critiqueMtime });
+        console.log(`  → critique.written event — notifying master...`);
+        herdr.sendCommand(
+          opts.rootPaneId!,
+          `Read ${critiqueFile}. The critic has reviewed your proposal. Revise if needed, or write a card to .serf/board/backlog/ if you agree.`,
+        ).catch(() => {});
+      }
+    }, 3000);
 
     await new Promise<void>((resolve) => {
       let done = false;
@@ -447,49 +522,24 @@ export async function launchInteractiveMasterConversation(
         return false;
       }
 
-      // Kick the critic to review whenever the master writes/updates master-proposal.md.
-      // The critic is an interactive agent that only acts on terminal input; it does not
-      // watch the filesystem. Without this, a fresh proposal leaves critique.md stale.
-      function kickCriticOnProposal(): void {
-        if (shouldKickCritic()) {
-          console.log(`  → master-proposal.md updated. Kicking critic to review...`);
-          herdr.sendCommand(
-            criticPaneId,
-            `Read ${proposalFile} and write your evaluation to ${join(serfTmp(), "critique.md")}. Be adversarial.`,
-          ).catch(() => {});
-        }
-      }
-
-      if (checkAndResolve()) return;
-
       try {
+        const backlogDir = join(getSerfDir(), "board", "backlog");
         const watcher = watch(backlogDir, (_eventType, filename) => {
           if (filename && filename.endsWith(".md")) {
-            setTimeout(() => checkAndResolve(), 500);
+            setTimeout(() => { if (!done) checkAndResolve(); }, 500);
           }
         });
         watcher.on("error", () => { if (!done) { done = true; resolve(); } });
       } catch {}
 
-      // Watch the tmp dir for master-proposal.md writes/updates and kick the critic.
-      try {
-        const proposalWatcher = watch(serfTmp(), (_eventType, filename) => {
-          if (filename === "master-proposal.md") {
-            setTimeout(kickCriticOnProposal, 500);
-          }
-        });
-        proposalWatcher.on("error", () => {});
-      } catch {}
-
-      const interval = setInterval(() => {
-        if (done) { clearInterval(interval); return; }
+      const exitInterval = setInterval(async () => {
+        if (done) { clearInterval(exitInterval); clearInterval(pollInterval); return; }
 
         if (checkAndResolve()) {
-          clearInterval(interval);
+          clearInterval(exitInterval);
+          clearInterval(pollInterval);
           return;
         }
-
-        kickCriticOnProposal();
 
         try {
           const masterPane = herdr.getPane(opts.rootPaneId!);
@@ -500,17 +550,20 @@ export async function launchInteractiveMasterConversation(
             if (masterDead && criticDead) {
               console.log(`  → Both agents exited.`);
               done = true;
-              clearInterval(interval);
+              clearInterval(exitInterval);
+              clearInterval(pollInterval);
               resolve();
             }
           }).catch(() => {
             done = true;
-            clearInterval(interval);
+            clearInterval(exitInterval);
+            clearInterval(pollInterval);
             resolve();
           });
         } catch {
           done = true;
-          clearInterval(interval);
+          clearInterval(exitInterval);
+          clearInterval(pollInterval);
           resolve();
         }
       }, 60_000);

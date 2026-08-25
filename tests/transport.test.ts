@@ -1,7 +1,7 @@
 import { test, expect, describe } from "bun:test";
-import { FakeTransport, HeadlessTransport, HerdrTransport, makeProposalKicker, type Transport, type RunOpts } from "../src/transport";
+import { FakeTransport, HeadlessTransport, HerdrTransport, type Transport, type RunOpts } from "../src/transport";
 import { buildInvocation, listAgents, isHeadless } from "../src/agent-command";
-import { writeFileSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync, utimesSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -82,38 +82,33 @@ describe("Transport", () => {
   });
 });
 
-describe("makeProposalKicker", () => {
-  test("returns false when proposal has not changed since construction", () => {
+describe("proposal mtime polling", () => {
+  test("detects when proposal is updated", () => {
     const dir = mkdtempSync(join(tmpdir(), "serf-kicker-"));
     const file = join(dir, "master-proposal.md");
     writeFileSync(file, "v1");
-    const kicker = makeProposalKicker(file);
-    expect(kicker()).toBe(false);
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  test("returns true once when proposal is updated, then false again", () => {
-    const dir = mkdtempSync(join(tmpdir(), "serf-kicker-"));
-    const file = join(dir, "master-proposal.md");
-    writeFileSync(file, "v1");
-    const kicker = makeProposalKicker(file);
-    expect(kicker()).toBe(false);
+    const mtime1 = existsSync(file) ? statSync(file).mtimeMs : 0;
 
     writeFileSync(file, "v2");
     utimesSync(file, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
-    expect(kicker()).toBe(true);
-    expect(kicker()).toBe(false);
+    const mtime2 = statSync(file).mtimeMs;
+
+    expect(mtime2).toBeGreaterThan(mtime1);
+
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("returns true when proposal appears after construction", () => {
+  test("detects when proposal appears after construction", () => {
     const dir = mkdtempSync(join(tmpdir(), "serf-kicker-"));
     const file = join(dir, "master-proposal.md");
-    const kicker = makeProposalKicker(file);
-    expect(kicker()).toBe(false);
+
+    const mtime1 = existsSync(file) ? statSync(file).mtimeMs : 0;
+    expect(mtime1).toBe(0);
 
     writeFileSync(file, "v1");
-    expect(kicker()).toBe(true);
+    const mtime2 = statSync(file).mtimeMs;
+    expect(mtime2).toBeGreaterThan(0);
+
     rmSync(dir, { recursive: true, force: true });
   });
 });
