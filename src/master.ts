@@ -1,25 +1,14 @@
 import { callLLM, BudgetTracker } from "./llm";
 import { critique, parseVerdict, type CriticVerdict } from "./critic";
-import { critiqueMultipass, type MultiPassVerdict, type Effort, type CuriosityPoint, EFFORT_PASSES, type CritiqueFn } from "./critic_multipass";
 import { readCard, moveCard, writeCard, listCards, addTask, computeFrontier, unblockDependents, type Card } from "./board";
-import { readSerf, listSerfs, createSerf, type SerfIdentity } from "./serf";
 import { appendEvent } from "./events";
 import { getSerfDir, ensureDir } from "./paths";
 import { loadConfig } from "./state";
-import { triageCard, type TriageResult } from "./triage";
-import { critiquePlan } from "./plan-critic";
-import { critiqueWork } from "./work-critic";
-import { arbitrate, type ArbiterResult } from "./arbiter";
-import { deliberate } from "./deliberation";
-import { createSandboxProfile, isSandboxAvailable, type SandboxProfile } from "./sandbox";
-import { resolveStrategy, type AutoimproveStrategy } from "./strategies";
-import { createCardBudget, trackPhaseUsage, isPhaseOverBudget, formatBudget, getTotalUsage, type CardBudget, type Phase } from "./budget";
-import { ResourceGauge, type TaskResourceSummary } from "./resource-gauge";
-import { createPrdStub, prdExists, readPrd, syncDecisionsToCard, syncVerificationToCard } from "./prd";
-import { syncOpencodeConfig } from "./opencode-sync";
-import { buildMasterPrompt, buildCriticConversationPrompt, buildPlanAgentPrompt, buildAgentPrompt, buildCriticAgentPrompt, buildCriticFollowupPrompt, buildCriticResolvePrompt } from "./prompts";
-import { getStateSummary, updateLastSession, addOpenFailure, resolveOpenFailure, addLesson, addBuildingBlock, addHarnessEdit } from "./state-file";
-import { createSkillFolder, appendLesson, appendFailureMode, writeTrace, getRelevantSkills } from "./skills";
+import { createCardBudget, trackPhaseUsage, isPhaseOverBudget, formatBudget, getTotalUsage, type CardBudget } from "./budget";
+import { createPrdStub, prdExists, syncDecisionsToCard, syncVerificationToCard } from "./prd";
+import { buildMasterPrompt, buildCriticConversationPrompt, buildPlanAgentPrompt, buildAgentPrompt } from "./prompts";
+import { getStateSummary, updateLastSession, addOpenFailure, addLesson } from "./state-file";
+import { appendFailureMode, writeTrace, createSkillFolder } from "./skills";
 import type { Transport, ActorRunResult } from "./transport";
 import { HeadlessTransport, HerdrTransport, FakeTransport, launchInteractiveMasterConversation, type ConversationResult } from "./transport";
 import { NoopVisibility, HerdrVisibility, type VisibilityLayer, type PaneHandle } from "./visibility";
@@ -110,9 +99,6 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
           await sendCommand(herdrRootPaneId!, `cd "${process.cwd()}" && ${inv.command} ${argStr}`);
           await new Promise((r) => setTimeout(r, 10_000));
           const masterPromptFile = join(getSerfDir(), "tmp", "master-prompt.md");
-          const { writeFileSync } = await import("node:fs");
-          const { buildMasterPrompt } = await import("./prompts");
-          const { getStateSummary } = await import("./state-file");
           writeFileSync(masterPromptFile, buildMasterPrompt(getStateSummary()));
           await sendCommand(herdrRootPaneId!, `Read ${masterPromptFile} and follow those instructions.`);
           console.log(`  ✓ Master launched.`);
@@ -144,9 +130,6 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
         await sendCommand(herdrRootPaneId!, `cd "${process.cwd()}" && ${inv.command} ${argStr}`);
         await new Promise((r) => setTimeout(r, 10_000));
         const masterPromptFile = join(getSerfDir(), "tmp", "master-prompt.md");
-        const { writeFileSync } = await import("node:fs");
-        const { buildMasterPrompt } = await import("./prompts");
-        const { getStateSummary } = await import("./state-file");
         writeFileSync(masterPromptFile, buildMasterPrompt(getStateSummary()));
         await sendCommand(herdrRootPaneId!, `Read ${masterPromptFile} and follow those instructions.`);
         console.log(`  ✓ Master launched.`);
@@ -248,23 +231,16 @@ async function processCard(
     console.log(`    → prd: .serf/prds/${card.id}.md`);
   }
 
-  const triage = await runTriage(card, cbudget);
-  if (!triage || triage.action !== "ready") {
-    handleTriageOutcome(card, triage);
-    return;
-  }
-
   const worktreePath = createWorktree(card);
   if (worktreePath) {
     console.log(`    → worktree: ${worktreePath.split("/").slice(-2).join("/")}`);
   }
 
   const serfBase = worktreePath ? join(worktreePath, ".serf") : getSerfDir();
-  const profile = worktreePath && isSandboxAvailable() ? createSandboxProfile(worktreePath, card.id, loadConfig()) : undefined;
 
   let planOk = false;
   try {
-    planOk = await runPlanPhase(card, cbudget, serfBase, transport, worktreePath, profile);
+    planOk = await runPlanPhase(card, cbudget, serfBase, transport, worktreePath);
   } catch (err) {
     console.log(`  ⚠ plan phase failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -285,11 +261,8 @@ async function processCard(
   const handle = await visibility.onTaskStart(card, worktreePath || process.cwd(), herdrWorkspaceId, herdrRootPaneId);
   let result: "done" | "review" = "review";
 
-  let gaugeSummary: TaskResourceSummary | null = null;
   try {
-    const execResult = await executeWithStrategy(card, cbudget, transport, serfBase, profile, escalationTransport, serfTabId);
-    result = execResult.result;
-    gaugeSummary = execResult.gaugeSummary;
+    result = await executeWithCritique(card, cbudget, transport, serfBase);
   } catch (err) {
     console.log(`  ⚠ execution failed: ${err instanceof Error ? err.message : String(err)}`);
     moveCard(card.id, "review");
@@ -299,10 +272,10 @@ async function processCard(
   await visibility.onTaskEnd(handle, { output: "", tokensUsed: 0, ok: result === "done" });
   await cleanupSpawnedSerfsForCard(serfTabId);
 
-    if (result === "review" && herdrWorkspaceId && herdrRootPaneId) {
-      console.log(`    → Launching master + critic evaluation of failure...`);
-      await escalateToMasterCritic(card, herdrWorkspaceId, herdrRootPaneId, options.model, serfTabId, gaugeSummary ?? undefined);
-    }
+  if (result === "review" && herdrWorkspaceId && herdrRootPaneId) {
+    console.log(`    → Launching master + critic evaluation of failure...`);
+    await escalateToMasterCritic(card, herdrWorkspaceId, herdrRootPaneId, options_model(model), serfTabId);
+  }
 
   if (worktreePath) {
     removeWorktree(card, result === "done");
@@ -310,40 +283,8 @@ async function processCard(
   }
 }
 
-async function runTriage(card: Card, cbudget: CardBudget): Promise<TriageResult | null> {
-  const mission = readPlanMission();
-  const result = await triageCard(card, { mission });
-  trackPhaseUsage(cbudget, "triage", result.tokensUsed);
-  console.log(`    → triage: ${result.action} (${result.reason})`);
-  return result;
-}
-
-function handleTriageOutcome(card: Card, triage: TriageResult | null): void {
-  const action = triage?.action ?? "needs-clarification";
-  const reason = triage?.reason ?? "Triage did not return a result.";
-  card.context = reason;
-  card.updatedAt = new Date().toISOString();
-  writeCard(card);
-
-  if (action === "out-of-scope") {
-    moveCard(card.id, "review");
-    appendEvent("task.rejected", { card: card.id, reason });
-    console.log(`    ✗ Rejected: ${reason}`);
-  } else if (action === "decompose") {
-    const subtasks = triage?.subtasks ?? ["Break into smaller tasks"];
-    for (let i = 0; i < subtasks.length; i++) {
-      const subCard = addTask(subtasks[i], subtasks[i]);
-      subCard.blockedBy = [card.id];
-      writeCard(subCard);
-    }
-    moveCard(card.id, "done");
-    appendEvent("task.decomposed", { card: card.id, reason, subtasks });
-    console.log(`    ~ Decomposed into ${subtasks.length} subtask(s), blocked by ${card.id}.`);
-  } else {
-    moveCard(card.id, "review");
-    appendEvent("task.needs-clarification", { card: card.id, reason });
-    console.log(`    ~ Needs clarification: ${reason}`);
-  }
+function options_model(model?: string): string | undefined {
+  return model;
 }
 
 async function runPlanPhase(
@@ -352,17 +293,15 @@ async function runPlanPhase(
   serfBase: string,
   transport: Transport,
   worktreePath: string | null,
-  profile?: SandboxProfile,
 ): Promise<boolean> {
   const planPath = join(serfBase, "board", "in-progress", `${card.id}-plan.md`);
-  const actorIdentity = readSerf("actor") ?? { name: "actor", mission: "", persona: "", lever: [], measurement: [], fate: "" };
+  const actorIdentity = readSerfSafe("actor");
   const planPrompt = buildPlanAgentPrompt(card, actorIdentity);
 
   const execResult = await transport.run(planPrompt, {
     cwd: worktreePath || process.cwd(),
     timeoutMs: 120_000,
     outputFile: planPath,
-    profile,
     label: `plan | ${card.title.slice(0, 30)}`,
   });
 
@@ -373,78 +312,75 @@ async function runPlanPhase(
     return false;
   }
 
-  const { verdict, tokensUsed } = await critiquePlan(card, execResult.output);
+  const { verdict, tokensUsed } = await critiquePlanSimple(card, execResult.output);
   trackPhaseUsage(cbudget, "plan", tokensUsed);
   console.log(`    → plan critique: ${verdict.verdict} (${verdict.reasoning})`);
   return verdict.verdict === "pass";
 }
 
-function readPlanMission(): string {
-  const planPath = join(getSerfDir(), "plan.md");
+async function critiquePlanSimple(card: Card, plan: string): Promise<{ verdict: CriticVerdict; tokensUsed: number }> {
+  const prompt = `You are a plan critic. Decide whether the plan is good enough to execute.
+
+A plan must satisfy ALL to pass:
+1. Addresses every acceptance criterion with a concrete step.
+2. Names files that will be created or modified.
+3. Includes a verification step (test, build, lint, typecheck).
+4. Identifies risky or uncertain steps.
+5. Feasible for a single coding agent to execute.
+
+TASK:
+${card.task}
+
+GOAL:
+${card.goal}
+
+ACCEPTANCE CRITERIA:
+${card.acceptance.map((a, i) => `${i + 1}. ${a}`).join("\n")}
+
+PLAN TO EVALUATE:
+${plan.slice(0, 3000)}
+
+Respond EXACTLY:
+VERDICT: pass | fail | uncertain
+CONFIDENCE: 0.0 to 1.0
+REASONING: [specific problems or confirmation]`;
+
+  const result = await callLLM(prompt, { maxTokens: 512, useCriticModel: true });
+  const verdict = parseVerdict(result.text);
+  return { verdict, tokensUsed: result.tokensUsed };
+}
+
+function readSerfSafe(name: string): any {
   try {
-    return readFileSync(planPath, "utf-8").slice(0, 1000);
+    const { readSerf } = require("./serf");
+    return readSerf(name) ?? { name, mission: "", persona: "", lever: [], measurement: [], fate: "" };
   } catch {
-    return "Build and maintain the serf coding-agent harness.";
+    return { name, mission: "", persona: "", lever: [], measurement: [], fate: "" };
   }
 }
 
-interface ActorRunResultInternal {
-  output: string;
-  tokensUsed: number;
-  ok: boolean;
-}
-
-async function executeWithStrategy(
+async function executeWithCritique(
   card: Card,
   cbudget: CardBudget,
   transport: Transport,
   serfBase: string,
-  profile?: SandboxProfile,
-  escalationTransport?: Transport,
-  serfTabId?: string,
-): Promise<{ result: "done" | "review"; gaugeSummary: TaskResourceSummary | null }> {
-  const config = loadConfig();
-  const strategy = resolveStrategy(config?.autoimproveStrategy);
-  const actorIdentity = readSerf("actor") ?? { name: "actor", mission: "", persona: "", lever: [], measurement: [], fate: "" };
+): Promise<"done" | "review"> {
+  const actorIdentity = readSerfSafe("actor");
   const basePrompt = buildAgentPrompt(card, actorIdentity, "", 1);
-
-  const previousOutputs: string[] = [];
-  const previousVerdicts: CriticVerdict[] = [];
   const outputPath = join(serfBase, "board", "in-progress", `${card.id}-output.md`);
-  const gauge = new ResourceGauge();
-  gauge.startTask();
+  let previousFeedback = "";
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     console.log(`    → Attempt ${attempt}: actor working...`);
-    gauge.startAttempt(attempt);
 
-    const ctx = {
-      card,
-      attempt,
-      maxAttempts: MAX_RETRIES,
-      previousOutputs,
-      previousVerdicts,
-      phaseBudget: cbudget,
-    };
-    const next = await strategy.nextAttempt(ctx);
-    trackPhaseUsage(cbudget, "execution", next.tokensUsed);
-
-    const prompt = attempt === 1 ? basePrompt : `${basePrompt}\n\n${next.prompt}`;
+    const prompt = attempt === 1 ? basePrompt : `${basePrompt}\n\n${previousFeedback}`;
     const runResult = await transport.run(prompt, {
       cwd: process.cwd(),
       timeoutMs: 600_000,
       outputFile: outputPath,
-      profile,
       label: `actor: ${card.title.slice(0, 30)}`,
     });
     trackPhaseUsage(cbudget, "execution", runResult.tokensUsed);
-
-    gauge.endAttempt();
-    const resourceSummary = gauge.getSummary();
-
-    if (resourceSummary.peakRSSMB > 0) {
-      console.log(`    → ${gauge.formatSummary().split("\n").slice(1).join("\n")}`);
-    }
 
     if (!runResult.ok || isPhaseOverBudget(cbudget, "execution")) {
       console.log(`    ⚠ execution phase failed or over budget`);
@@ -452,153 +388,62 @@ async function executeWithStrategy(
       continue;
     }
 
-    previousOutputs.push(runResult.output);
     console.log(`    → ${runResult.output.length} chars`);
 
-    const { verdict, tokensUsed } = await critiqueWork(card, runResult.output, { useMultipass: true, resourceSummary });
+    const { verdict, tokensUsed } = await critique(card.task, runResult.output, card.acceptance);
     trackPhaseUsage(cbudget, "critic", tokensUsed);
-    const singleVerdict = "finalVerdict" in verdict
-      ? normalizeMultipassVerdict(verdict)
-      : verdict;
-    previousVerdicts.push(singleVerdict);
 
-    printVerdict(verdict);
-
-    if (resourceSummary.trend === "diverging") {
-      console.log(`    ⚠ Resource trend: DIVERGING (peak ${resourceSummary.peakRSSMB} MB)`);
-    }
-
-    const decision = arbitrate(card, verdict, attempt, MAX_RETRIES);
-    console.log(`    → arbiter: ${decision.decision} (${decision.reason})`);
+    console.log(`    ┌── CRITIC ──────────────────────────`);
+    console.log(`    │ Verdict: ${verdict.verdict.toUpperCase()}`);
+    console.log(`    │ Confidence: ${(verdict.confidence * 100).toFixed(0)}%`);
+    console.log(`    │ Reasoning: ${verdict.reasoning}`);
+    console.log(`    └────────────────────────────────────\n`);
 
     appendEvent("critic.verdict", {
       card: card.id, attempt,
-      verdict: singleVerdict.verdict,
-      confidence: singleVerdict.confidence,
-      decision: decision.decision,
-      resourceTrend: resourceSummary.trend,
-      peakRSSMB: resourceSummary.peakRSSMB,
+      verdict: verdict.verdict,
+      confidence: verdict.confidence,
     });
 
-    if (decision.decision === "pass") {
-      finishCard(card, runResult.output, decision.quality ?? singleVerdict.confidence, cbudget);
-      const verifyLines = [
-        `ISC pass: attempt ${attempt}, quality ${((decision.quality ?? singleVerdict.confidence) * 100).toFixed(0)}%`,
-        `Resource: peak ${resourceSummary.peakRSSMB} MB, trend ${resourceSummary.trend}`,
-      ];
-      syncVerificationToCard(card, verifyLines);
+    if (verdict.verdict === "pass" && verdict.confidence > 0.7) {
+      finishCard(card, runResult.output, verdict.confidence, cbudget);
+      syncVerificationToCard(card, [
+        `Pass: attempt ${attempt}, confidence ${(verdict.confidence * 100).toFixed(0)}%`,
+      ]);
       writeCard(card);
-      appendEvent("task.completed", { card: card.id, quality: decision.quality ?? singleVerdict.confidence, attempt });
-      console.log(`    ✓ Completed (quality ${((decision.quality ?? singleVerdict.confidence) * 100).toFixed(0)}%)\n`);
-      const skillName = card.title.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 2).slice(0, 3).join("-");
-      appendLesson(skillName, `"${card.title}" completed on attempt ${attempt}. Files changed: ${runResult.output.slice(0, 200)}`);
+      appendEvent("task.completed", { card: card.id, quality: verdict.confidence, attempt });
+      console.log(`    ✓ Completed (confidence ${(verdict.confidence * 100).toFixed(0)}%)\n`);
       addLesson(`"${card.title}" completed on attempt ${attempt}.`);
-      return { result: "done", gaugeSummary: gauge.getSummary() };
+      return "done";
     }
 
-    if (decision.decision === "retry") {
-      appendEvent("task.retry", { card: card.id, attempt, issues: singleVerdict.issues });
-      continue;
+    previousFeedback = `CRITIC FEEDBACK (attempt ${attempt} was ${verdict.verdict}):\nIssues: ${verdict.issues.join("; ")}\nReasoning: ${verdict.reasoning}\n\nAddress each issue with concrete evidence and file paths.`;
+    appendEvent("task.retry", { card: card.id, attempt, issues: verdict.issues });
+
+    if (verdict.confidence <= 0.7 && attempt >= 2) {
+      console.log(`    ⚠ Low confidence after ${attempt} attempts. Escalating.`);
+      break;
     }
-
-    if (decision.decision === "deliberate") {
-      const deliberation = await deliberate(card, singleVerdict, cbudget);
-      trackPhaseUsage(cbudget, "critic", deliberation.tokensUsed);
-      console.log(`    → deliberation: ${deliberation.resolved ? "resolved" : "gridlock"} (${deliberation.reason})`);
-
-      appendEvent("task.deliberation", {
-        card: card.id, attempt,
-        resolved: deliberation.resolved,
-        resolution: deliberation.resolution,
-      });
-
-      if (deliberation.resolved) {
-        if (deliberation.resolution === "retry") continue;
-        if (deliberation.resolution === "decompose") {
-          const subCard = addTask(`Decompose: ${card.title}`, card.task);
-          subCard.blockedBy = [card.id];
-          writeCard(subCard);
-          moveCard(card.id, "review");
-          appendEvent("task.failed", { card: card.id, reason: "decomposed-after-deliberation" });
-          return { result: "review", gaugeSummary: gauge.getSummary() };
-        }
-        if (deliberation.resolution === "accept-partial") {
-          finishCard(card, runResult.output, 0.6, cbudget);
-          appendEvent("task.completed", { card: card.id, quality: 0.6, attempt, note: "partial-accept" });
-          return { result: "done", gaugeSummary: gauge.getSummary() };
-        }
-      } else if (deliberation.issueLetter) {
-        const issuePath = join(getSerfDir(), "board", "review", `${card.id}-issue.md`);
-        writeFileSync(issuePath, deliberation.issueLetter);
-        console.log(`    → issue letter written to ${issuePath}`);
-      }
-    }
-
-    if (decision.decision === "decompose") {
-      const subCard = addTask(`Decompose: ${card.title}`, card.task);
-      subCard.blockedBy = [card.id];
-      writeCard(subCard);
-    }
-
-    moveCard(card.id, "review");
-    appendEvent("task.failed", { card: card.id, reason: decision.decision, attempts: attempt });
-    addOpenFailure(`${card.title}: ${singleVerdict.reasoning}`);
-    syncVerificationToCard(card, [
-      `ISC fail: attempt ${attempt}, ${decision.decision}`,
-      `Issues: ${singleVerdict.issues.join("; ")}`,
-      `Resource: peak ${resourceSummary.peakRSSMB} MB, trend ${resourceSummary.trend}`,
-    ]);
-    writeCard(card);
-    const skillName = card.title.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 2).slice(0, 3).join("-");
-    createSkillFolder(skillName, `Auto-created from failed task: ${card.title}`);
-    writeTrace(skillName, `${card.id}-${attempt}`, `# Trace: ${card.title} — attempt ${attempt}\n\n## Task\n${card.task}\n\n## What went wrong\n${singleVerdict.reasoning}\n\n## Issues\n${singleVerdict.issues.join("; ")}\n`);
-    appendFailureMode(skillName, `${singleVerdict.reasoning}`);
-    return { result: "review", gaugeSummary: gauge.getSummary() };
   }
 
   console.log(`    ✗ Failed ${MAX_RETRIES}x. Moved to review.`);
   moveCard(card.id, "review");
   appendEvent("task.failed", { card: card.id, reason: "max-retries", attempts: MAX_RETRIES });
   addOpenFailure(`${card.title}: max retries exceeded`);
-  return { result: "review", gaugeSummary: gauge.getSummary() };
+  syncVerificationToCard(card, [
+    `Fail: max ${MAX_RETRIES} attempts`,
+    `Issues: ${verdict_failed_issues(card)}`,
+  ]);
+  writeCard(card);
+  const skillName = card.title.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 2).slice(0, 3).join("-");
+  createSkillFolder(skillName, `Auto-created from failed task: ${card.title}`);
+  writeTrace(skillName, `${card.id}-final`, `# Trace: ${card.title}\n\n## Task\n${card.task}\n\n## What went wrong\n${previousFeedback}\n`);
+  appendFailureMode(skillName, previousFeedback);
+  return "review";
 }
 
-function normalizeMultipassVerdict(mpv: MultiPassVerdict): CriticVerdict {
-  return {
-    verdict: mpv.finalVerdict,
-    confidence: mpv.agreementRate,
-    issues: mpv.issues,
-    reasoning: mpv.reasoning,
-    evidence: mpv.evidence,
-    curiosity: mpv.curiosityNotes,
-  };
-}
-
-function printVerdict(verdict: MultiPassVerdict | CriticVerdict): void {
-  if ("finalVerdict" in verdict) {
-    printMultipassCritic(verdict);
-  } else {
-    console.log(`    ┌── WORK CRITIC ──────────────────────────`);
-    console.log(`    │ Verdict: ${verdict.verdict.toUpperCase()}`);
-    console.log(`    │ Confidence: ${(verdict.confidence * 100).toFixed(0)}%`);
-    console.log(`    │ Reasoning: ${verdict.reasoning}`);
-    console.log(`    └───────────────────────────────────────────────────\n`);
-  }
-}
-
-function printMultipassCritic(mpv: MultiPassVerdict): void {
-  console.log(`    ┌── GAN CRITIC (${mpv.totalPasses} passes) ──────────────────────────`);
-  console.log(`    │ Verdict:    ${mpv.finalVerdict.toUpperCase()}`);
-  console.log(`    │ Agreement: ${(mpv.agreementRate * 100).toFixed(0)}% (${mpv.passCount} pass / ${mpv.failCount} fail${mpv.uncertainCount > 0 ? ` / ${mpv.uncertainCount} uncertain` : ""})`);
-  console.log(`    │ Curiosity: ${(mpv.curiosity * 100).toFixed(0)}%`);
-  if (mpv.issues.length > 0) {
-    console.log(`    │ Issues:    ${mpv.issues.join(", ")}`);
-  }
-  if (mpv.curiosityNotes.length > 0) {
-    console.log(`    │ Curious:   ${mpv.curiosityNotes.slice(0, 3).join("; ")}`);
-  }
-  console.log(`    │ Reasoning: ${mpv.reasoning}`);
-  console.log(`    └───────────────────────────────────────────────────\n`);
+function verdict_failed_issues(card: Card): string {
+  return `See card ${card.id} for details`;
 }
 
 function finishCard(card: Card, output: string, quality: number, cbudget: CardBudget): void {
@@ -628,7 +473,7 @@ function ensureSeeded(): void {
     "board/backlog", "board/in-progress", "board/review", "board/done",
     "prds",
     "serfs", "knowledge/skills", "knowledge/patterns", "knowledge/failures", "knowledge/references",
-    "events", "worktrees", "tmp",
+    "events", "worktrees", "tmp", "trajectories",
     "workspaces/actor/.serf", "workspaces/critic/.serf", "workspaces/critic/.serf/verdicts",
   ]) {
     ensureDir(join(serfDir, dir));
@@ -672,7 +517,6 @@ async function escalateToMasterCritic(
   rootPaneId: string,
   model?: string,
   serfTabId?: string,
-  resourceSummary?: { formatSummary: () => string; trend: string; peakRSSMB: number },
 ): Promise<void> {
   const skillName = card.title.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 2).slice(0, 3).join("-");
   createSkillFolder(skillName, `Failed task: ${card.title}`);
@@ -683,8 +527,6 @@ async function escalateToMasterCritic(
     const traces = readdirSync(tracesDir).map((f) => readFileSync(join(tracesDir, f), "utf-8")).join("\n\n---\n\n");
     traceSummary = traces.slice(0, 3000);
   } catch {}
-
-  const resourceBlock = resourceSummary ? `\n## Resource strain\n${resourceSummary.formatSummary()}\n\nIf the approach is resource-divergent (memory trending upward), consider decomposing the task or accepting partial.\n` : "";
 
   const masterPrompt = `You are the master serf. A task has failed multiple times and escalated to you.
 
@@ -697,14 +539,11 @@ ${card.acceptance.map((a) => `- ${a}`).join("\n")}
 
 ## Failure traces
 ${traceSummary}
-${resourceBlock}
+
 ## Your job
 1. Read the failure traces and understand WHY the task keeps failing.
 2. Talk with the critic (in the pane next to you) about the best approach.
 3. Write your proposed approach to .serf/tmp/proposed-approach.md.
-   - If it's a code solution: describe what code to write and where.
-   - If it's a harness rule: state the rule and which file it goes in.
-   - If the task should be decomposed: write the sub-tasks.
 4. The harness will spawn a serf to execute your approach.
 
 ## State from past sessions
@@ -721,8 +560,7 @@ ${traceSummary}
 ## Your job
 1. Read the traces and evaluate the master's proposed approach.
 2. Push back if the approach is vague, won't work, or misses the root cause.
-3. If the approach is good, say so. If not, propose a better one.
-4. The master writes the final approach to .serf/tmp/proposed-approach.md.`;
+3. If the approach is good, say so. If not, propose a better one.`;
 
   const result = await launchInteractiveMasterConversation(masterPrompt, criticPrompt, {
     cwd: process.cwd(),
@@ -783,7 +621,7 @@ async function runSkillSerf(
 
   await sendCommand(paneId, `cd "${process.cwd()}" && ${invocation.command} ${argStr}`);
   await new Promise((r) => setTimeout(r, 10_000));
-  await sendCommand(paneId, `Read ${approachFile} and execute the proposed approach. Write code to .serf/knowledge/skills/${skillName}/src/ and tests alongside. Run bun test in that folder. If tests pass, write "BUILDING_BLOCK_READY" to .serf/tmp/skill-result.md. If you can't complete it, write a failure trace to .serf/tmp/skill-result.md with FAILURE_REASON. NEVER install globally. No npm install -g, no pip install --user, no brew install, no curl|bash, no sudo. Use the project's local package manager and project manifest only.`);
+  await sendCommand(paneId, `Read ${approachFile} and execute the proposed approach. Write code to .serf/knowledge/skills/${skillName}/src/ and tests alongside. Run bun test in that folder. If tests pass, write "BUILDING_BLOCK_READY" to .serf/tmp/skill-result.md. If you can't complete it, write a failure trace to .serf/tmp/skill-result.md with FAILURE_REASON. NEVER install globally.`);
 
   console.log(`  → Serf launched in serfs tab. Waiting for result...`);
 
@@ -833,10 +671,12 @@ async function runSkillSerf(
     console.log(`  → Building block ready. Running test gate...`);
     const skillSrcDir = join(getSerfDir(), "knowledge", "skills", skillName, "src");
     try {
-      const testResult = execSync("bun test", { cwd: skillSrcDir, encoding: "utf-8", stdio: "pipe", timeout: 60_000 });
+      execSync("bun test", { cwd: skillSrcDir, encoding: "utf-8", stdio: "pipe", timeout: 60_000 });
       console.log(`  → Skill tests pass. Promoting building block.`);
+      const { addBuildingBlock } = await import("./state-file");
       addBuildingBlock(`${skillName}/src/`);
       addLesson(`Building block promoted: ${skillName}`);
+      const { resolveOpenFailure } = await import("./state-file");
       resolveOpenFailure(skillName);
     } catch {
       console.log(`  → Skill tests failed. Back to review.`);
@@ -864,8 +704,7 @@ async function cleanupSpawnedSerfsForCard(serfTabId?: string): Promise<void> {
 
 export { createSerf, readSerf, listSerfs, type SerfIdentity };
 export { critique, parseVerdict, type CriticVerdict };
-export { critiqueMultipass, type MultiPassVerdict, type Effort, EFFORT_PASSES, type CritiqueFn };
 export { callLLM, BudgetTracker };
-export { buildMasterPrompt, buildAgentPrompt, buildCriticAgentPrompt, buildCriticFollowupPrompt, buildCriticResolvePrompt };
+export { buildMasterPrompt, buildAgentPrompt };
 export { HeadlessTransport, HerdrTransport, FakeTransport, type Transport, type ActorRunResult };
 export { NoopVisibility, HerdrVisibility, type VisibilityLayer };

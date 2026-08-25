@@ -1,6 +1,11 @@
 import { callLLM, type CallLLMResult } from "./llm";
-import type { TaskResourceSummary } from "./resource-gauge";
 import { collectStyleGuidesForOutput, formatStyleBlock } from "./style";
+
+export interface TaskResourceSummary {
+  peakRSSMB: number;
+  trend: string;
+  attempts: { attempt: number; peakRSSMB: number; deltaRSSMB: number; wallClockMs: number }[];
+}
 
 export interface CriterionAnswer {
   criterion: string;
