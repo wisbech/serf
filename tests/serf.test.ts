@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { createSerf, readSerf, listSerfs, morphSerf, deprecateSerf, MASTER_IDENTITY, type SerfIdentity } from "../src/v2/serf";
+import { createSerf, readSerf, listSerfs, morphSerf, deprecateSerf, MASTER_IDENTITY, type SerfIdentity } from "../src/serf";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

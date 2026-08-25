@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { addTask, readCard, moveCard, listCards, writeCard, setFeedback, deleteCard, validateCard } from "../src/v2/board";
+import { addTask, readCard, moveCard, listCards, writeCard, setFeedback, deleteCard, validateCard } from "../src/board";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

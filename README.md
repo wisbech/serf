@@ -7,14 +7,15 @@ Serf is a protocol + CLI for managing coding agents. The `.serf/` folder in your
 ## Quick Start
 
 ```bash
-# Install
+# Clone and link (local, not global)
 git clone https://github.com/wisbech/serf.git
 cd serf
-npm install -g .
+bun install
+bun run build
+bun link
 
-# Or run directly without install
-cd serf
-bun run src/index.ts
+# Or run directly without linking
+bun run src/index.ts init
 
 # Initialize in your project
 cd your-project

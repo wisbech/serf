@@ -10,7 +10,7 @@ The long-term vision is a **self-improving dark factory**: curiosity generated b
 
 Success criteria for v1.0.0:
 
-1. `npm install -g . && serf init && serf start` works in a fresh repo.
+1. `bun install && bun run build && bun link && serf init && serf start` works in a fresh repo.
 2. The master serf talks with the user, surveys the project, and writes well-specified tasks.
 3. Actor serfs execute tasks autonomously and write results.
 4. The critic adversarially evaluates output against evaluable acceptance criteria.

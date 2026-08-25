@@ -1,5 +1,15 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { getSerfDir } from "./paths";
+import { loadConfig, saveConfig, type Config } from "./state";
+import { detectCapabilities, defaultAgentFromCapabilities, printCapabilities } from "./capabilities";
+import { detectProviders, preferredProvider, defaultModelForProvider, providerInstructions } from "./providers";
+import { listAgents } from "./agent-command";
+import { addTask, validateCard, listCards, moveCard } from "./board";
+import { startMaster } from "./master";
 
 const ARGS = process.argv.slice(2);
 
@@ -7,10 +17,7 @@ async function main() {
   const cmd = ARGS[0];
   const args = ARGS.slice(1);
 
-  // `serf .` is a shortcut to init-and-start in the current directory.
   if (cmd === ".") {
-    const { existsSync } = require("node:fs");
-    const { getSerfDir } = require("./v2/paths");
     if (!existsSync(getSerfDir())) {
       handleInit();
     }
@@ -25,6 +32,8 @@ async function main() {
     case "start":    await handleStart(args); return;
     case "process":  await handleProcess(args); return;
     case "config":   handleConfig(args); return;
+    case "respawn":  await handleRespawn(args); return;
+    case "recover":  await handleRecover(); return;
     case "agents":   handleAgents(args); return;
     case "providers": await handleProviders(args); return;
     case "health":   await handleHealth(args); return;
@@ -42,12 +51,7 @@ async function main() {
 
 // ── INIT ──
 
-async function handleInit() {
-  const { existsSync, mkdirSync, writeFileSync } = require("node:fs");
-  const { join } = require("node:path");
-  const { execSync } = require("node:child_process");
-  const { getSerfDir } = require("./v2/paths");
-  const { detectCapabilities, defaultAgentFromCapabilities } = require("./v2/capabilities");
+function handleInit(): void {
   const dir = getSerfDir();
 
   if (existsSync(dir)) {
@@ -55,7 +59,6 @@ async function handleInit() {
     return;
   }
 
-  // Detect what's actually installed and configure the project for it.
   const caps = detectCapabilities(process.cwd());
   const agent = defaultAgentFromCapabilities(caps);
   const transport = caps.herdr ? "herdr" : "direct";
@@ -65,8 +68,7 @@ async function handleInit() {
   let backend = "anthropic";
 
   try {
-    const { detectProviders, preferredProvider, defaultModelForProvider } = require("./v2/providers");
-    const providers = await detectProviders();
+    const providers = detectProvidersSync();
     const best = preferredProvider(providers);
     if (best) {
       provider = best.name;
@@ -76,14 +78,13 @@ async function handleInit() {
       }
       backend = provider === "ollama" || provider === "vllm" ? "local" : provider;
     }
-  } catch (err) {
-    // provider detection is best-effort; fall back to agent-based defaults
-  }
+  } catch {}
 
   mkdirSync(join(dir, "board", "backlog"), { recursive: true });
   mkdirSync(join(dir, "board", "in-progress"), { recursive: true });
   mkdirSync(join(dir, "board", "review"), { recursive: true });
   mkdirSync(join(dir, "board", "done"), { recursive: true });
+  mkdirSync(join(dir, "prds"), { recursive: true });
   mkdirSync(join(dir, "serfs"), { recursive: true });
   mkdirSync(join(dir, "knowledge", "skills"), { recursive: true });
   mkdirSync(join(dir, "knowledge", "patterns"), { recursive: true });
@@ -91,99 +92,41 @@ async function handleInit() {
   mkdirSync(join(dir, "knowledge", "references"), { recursive: true });
   mkdirSync(join(dir, "events"), { recursive: true });
   mkdirSync(join(dir, "worktrees"), { recursive: true });
+  mkdirSync(join(dir, "tmp"), { recursive: true });
   mkdirSync(join(dir, "workspaces", "actor", ".serf"), { recursive: true });
   mkdirSync(join(dir, "workspaces", "critic", ".serf", "verdicts"), { recursive: true });
 
   writeFileSync(join(dir, "plan.md"), "# Plan\n\nThe mission and current direction.\n");
 
-  writeFileSync(join(dir, "config.json"), JSON.stringify({
+  const config: Config = {
     agent,
     model,
     backend,
     provider,
     terminal: "auto",
     transport,
-  }, null, 2) + "\n");
+  };
+  saveConfig(config);
 
-  writeFileSync(join(dir, "serfs", "master.md"), `# master
-
-## Mission
-Orchestrate the dark factory. Survey the project, talk with the user, write tasks, spawn serfs, ensure convergence.
-
-## Persona
-Clear, strategic, autonomous. Asks good questions. Writes evaluable goals and levers.
-
-## Lever
-- .serf/ folder (board, knowledge, identities, events)
-- User conversation
-- callLLM for classification and planning
-
-## Measurement
-- Tasks written per session: >0
-- Tasks that pass critic: >70%
-- User refinement rate: <30%
-
-## Fate
-If the factory is confusing, my protocol is wrong, not me.
-`);
-
-  writeFileSync(join(dir, "serfs", "actor.md"), `# actor
-
-## Mission
-Execute tasks. Read the .serf/ folder, understand the task, do the work, write results.
-
-## Persona
-Direct, capable, autonomous. Reads the folder, does the work, doesn't stop to ask.
-
-## Lever
-- .serf/ folder (board, knowledge, serfs, plan)
-- File system
-- Build and test commands
-
-## Measurement
-- GAN critic pass rate: >70%
-- Task completion: >80%
-
-## Fate
-If I fail 3 times, the task description is bad, not me. The critic may spawn a specialized serf to handle what I can't.
-`);
-
-  writeFileSync(join(dir, "serfs", "critic.md"), `# critic
-
-## Mission
-Evaluate actor output adversarially. Find real problems. Don't be lenient.
-
-## Persona
-Hostile, precise, adversarial. Would you accept this from a subordinate? If not, fail it.
-
-## Lever
-- callLLM for evaluation
-- .serf/knowledge/ for standards and past failures
-
-## Measurement
-- False pass rate: <10% (if I pass it, it should actually be good)
-- High-confidence fail accuracy: >90%
-
-## Fate
-If I keep passing bad work, I'm not adversarial enough. If I keep failing good work, my criteria are wrong.
-`);
+  writeFileSync(join(dir, "serfs", "master.md"), masterIdentity());
+  writeFileSync(join(dir, "serfs", "actor.md"), actorIdentity());
+  writeFileSync(join(dir, "serfs", "critic.md"), criticIdentity());
 
   console.log("\n  ✓ .serf/ created");
   console.log("    ├── board/         (backlog, in-progress, review, done)");
-  console.log("    ├── serfs/          (actor, critic)");
+  console.log("    ├── serfs/          (actor, critic, master)");
   console.log("    ├── knowledge/      (skills, patterns, failures, references)");
   console.log("    ├── workspaces/     (per-agent private state)");
   console.log("    ├── worktrees/      (per-task isolated checkouts)");
+  console.log("    ├── tmp/            (wrapper scripts — kept inside .serf, not system tmp)");
   console.log("    ├── events/         (audit trail)");
   console.log("    └── plan.md         (edit this with your mission)");
 
   console.log("\n  Detected capabilities:");
-  const { printCapabilities } = require("./v2/capabilities");
   printCapabilities(caps);
 
   try {
-    const { detectProviders, providerInstructions } = require("./v2/providers");
-    const providers = await detectProviders();
+    const providers = detectProvidersSync();
     const available = providers.filter((p: any) => p.reachability === "available" || p.reachability === "needs-auth");
     console.log("\n  Providers:");
     for (const p of available) {
@@ -196,99 +139,25 @@ If I keep passing bad work, I'm not adversarial enough. If I keep failing good w
       console.log("  No provider detected.");
       console.log(`  ${providerInstructions("unknown")}`);
     }
-  } catch (err) {
-    // provider detection is best-effort
-  }
+  } catch {}
 
   console.log("\n  Next: serf .      (or: serf start)");
   console.log("  Or:   serf task \"do something\"  (add a task directly)\n");
 }
 
-// ── INTEGRATION CHECK ──
-
-const HERDR_INTEGRATIONS: Record<string, string> = {
-  claude: "claude",
-  opencode: "opencode",
-  codex: "codex",
-  pi: "pi",
-  aider: "omp",
-  hermes: "hermes",
-  cursor: "cursor",
-};
-
-function isInstalled(cmd: string): boolean {
-  try {
-    require("node:child_process").execSync(`which ${cmd} 2>/dev/null`, { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function checkIntegrations(): void {
-  const { execSync } = require("node:child_process");
-
-  const found: string[] = [];
-  for (const agent of Object.keys(HERDR_INTEGRATIONS)) {
-    if (isInstalled(agent)) found.push(agent);
-  }
-
-  if (found.length === 0) {
-    console.log("\n  ⚠ No coding agents found on PATH.");
-    console.log("    Install one: claude, opencode, aider, pi, hermes, or codex");
-    return;
-  }
-
-  console.log(`\n  Coding agents found: ${found.join(", ")}`);
-
-  const herdrInstalled = isInstalled("herdr");
-  if (!herdrInstalled) {
-    console.log("\n  herdr not found (optional — enables multi-pane agent management)");
-    console.log("    Install: curl -fsSL https://herdr.dev/install.sh | sh");
-    return;
-  }
-
-  // herdr is installed — check which integrations are already installed
-  let installedIntegrations: string[] = [];
-  try {
-    const output = execSync("herdr integration status 2>/dev/null", { encoding: "utf-8", stdio: "pipe" });
-    for (const agent of found) {
-      if (output.includes(agent)) installedIntegrations.push(agent);
-    }
-  } catch {}
-
-  const needsIntegration = found.filter(a => !installedIntegrations.includes(a));
-
-  if (needsIntegration.length === 0) {
-    console.log("  ✓ herdr integrations already installed for all detected agents");
-    return;
-  }
-
-  console.log(`\n  herdr found. Missing integrations for: ${needsIntegration.join(", ")}`);
-  console.log("  Installing...");
-
-  for (const agent of needsIntegration) {
-    const integration = HERDR_INTEGRATIONS[agent];
-    try {
-      execSync(`herdr integration install ${integration}`, { stdio: "inherit" });
-      console.log(`    ✓ ${agent} integration installed`);
-    } catch {
-      console.log(`    ✗ ${agent} integration failed (run: herdr integration install ${integration})`);
-    }
-  }
+function detectProvidersSync(): any[] {
+  const providers = detectProviders();
+  return providers as any;
 }
 
 // ── TASK ──
 
-async function handleTask(args: string[]) {
+async function handleTask(args: string[]): Promise<void> {
   if (args.length === 0) {
     console.log("Usage: serf task \"do something\"");
     process.exit(1);
   }
-  const { addTask, validateCard } = await import("./v2/board");
   const title = args.join(" ");
-
-  // Generate deterministic Goal, Lever, Acceptance from the title.
   const goal = `Achieve: ${title}`;
   const lever = `Edit source files and add/update tests to implement and verify the change`;
   const acceptance = generateAcceptance(title);
@@ -312,16 +181,9 @@ function generateAcceptance(title: string): string[] {
   const criteria: string[] = [
     `Source files were edited to implement: ${title}`,
     `The actor ran a verification command (test, build, lint, or typecheck) and reported the output`,
-    `Output file .serf/board/in-progress/<id>-output.md contains evidence of actual file edits and ends with SERF_TASK_DONE`,
   ];
   if (lower.includes("test") || lower.includes("tests")) {
     criteria.push("A new or updated test exists and passes");
-  }
-  if (lower.includes("fix") || lower.includes("bug")) {
-    criteria.push("The bug is reproduced by a failing test before the fix and passes after");
-  }
-  if (lower.includes("add") || lower.includes("new")) {
-    criteria.push("New functionality is reachable from the CLI or public API");
   }
   if (lower.includes("doc") || lower.includes("readme")) {
     criteria.push("Documentation file was edited and is readable");
@@ -331,8 +193,7 @@ function generateAcceptance(title: string): string[] {
 
 // ── BOARD ──
 
-async function handleBoard(args: string[]) {
-  const { listCards } = await import("./v2/board");
+async function handleBoard(args: string[]): Promise<void> {
   const sub = args[0] ?? "show";
 
   if (sub === "show") {
@@ -348,14 +209,16 @@ async function handleBoard(args: string[]) {
     console.log("  ├─────────────────────────────────────────────────────────────┤");
 
     for (const col of columns) {
-      const cards = all.filter(c => c.column === col);
+      const cards = all.filter((c) => c.column === col);
       const label = col.toUpperCase().padEnd(14);
       console.log(`  │  ${label} (${cards.length})${" ".repeat(Math.max(0, 43 - cards.length.toString().length))}│`);
       for (const card of cards) {
-        const title = card.title.slice(0, 45).padEnd(45);
+        const title = card.title.slice(0, 38).padEnd(38);
+        const blocked = card.blockedBy?.length ? ` [blocked by ${card.blockedBy.length}]` : "";
+        const frontier = !blocked && col === "backlog" ? " ★" : "  ";
         const quality = card.quality ? ` [${(card.quality * 100).toFixed(0)}%]` : "";
         const feedback = card.feedback ? ` (${card.feedback})` : "";
-        console.log(`  │    ${title}${quality}${feedback}`.padEnd(64) + "│");
+        console.log(`  │ ${frontier}${title}${blocked}${quality}${feedback}`.padEnd(64) + "│");
       }
       if (cards.length === 0) {
         console.log(`  │    ${"(empty)".padEnd(50)}│`);
@@ -367,7 +230,6 @@ async function handleBoard(args: string[]) {
   }
 
   if (sub === "move") {
-    const { moveCard } = await import("./v2/board");
     const id = args[1];
     const to = args[2] as any;
     const card = moveCard(id, to);
@@ -384,81 +246,148 @@ async function handleBoard(args: string[]) {
 
 // ── START ──
 
-async function handleStart(args: string[]) {
-  const { startMaster } = await import("./v2/master");
-  const { loadConfig, saveConfig } = require("./state");
+async function handleStart(args: string[]): Promise<void> {
   const budgetFlag = args.indexOf("--budget");
   const budgetLimit = budgetFlag >= 0 ? parseInt(args[budgetFlag + 1], 10) : undefined;
   const modelFlag = args.indexOf("--model");
   const model = modelFlag >= 0 ? args[modelFlag + 1] : undefined;
   const agentFlag = args.indexOf("--agent");
-  const agent = agentFlag >= 0 ? args[agentFlag + 1] : undefined;
   const onceFlag = args.includes("--once");
 
-  if (agent) {
+  if (agentFlag >= 0) {
     const config = loadConfig();
-    config.agent = agent;
+    config.agent = args[agentFlag + 1];
     saveConfig(config);
   }
 
   await startMaster({ budgetLimit, model, once: onceFlag });
 }
 
-// ── PROCESS ──
+// ── PROCESS (headless — no master interactive launch) ──
 
-async function handleProcess(args: string[]) {
-  const { startMaster } = await import("./v2/master");
+async function handleProcess(args: string[]): Promise<void> {
   const budgetFlag = args.indexOf("--budget");
   const budgetLimit = budgetFlag >= 0 ? parseInt(args[budgetFlag + 1], 10) : undefined;
   const modelFlag = args.indexOf("--model");
   const model = modelFlag >= 0 ? args[modelFlag + 1] : undefined;
   const onceFlag = args.includes("--once");
-  await startMaster({ budgetLimit, model, once: onceFlag });
+
+  await startMaster({ budgetLimit, model, once: onceFlag, skipMaster: true });
 }
 
 // ── HEALTH ──
 
-async function handleHealth(args: string[]) {
+interface BuiltInCheckResult {
+  name: string;
+  passed: boolean;
+  details: string;
+}
+
+function runBuiltInHealthChecks(): BuiltInCheckResult[] {
+  const results: BuiltInCheckResult[] = [];
+  const serfDir = getSerfDir();
+
+  results.push({
+    name: ".serf/ directory",
+    passed: existsSync(serfDir),
+    details: existsSync(serfDir) ? "Found" : "Missing — run `serf init`",
+  });
+
+  let configOk = false;
+  try {
+    loadConfig();
+    configOk = true;
+    results.push({ name: "config.json parses", passed: true, details: "Valid JSON" });
+  } catch (err) {
+    results.push({ name: "config.json parses", passed: false, details: `Parse error: ${err instanceof Error ? err.message : String(err)}` });
+  }
+
+  const identities = ["master.md", "actor.md", "critic.md"];
+  const missingIdentities = identities.filter(f => !existsSync(join(serfDir, "serfs", f)));
+  results.push({
+    name: "identity files exist",
+    passed: missingIdentities.length === 0,
+    details: missingIdentities.length === 0 ? "master, actor, critic present" : `Missing: ${missingIdentities.join(", ")}`,
+  });
+
+  const boardDirs = ["backlog", "in-progress", "review", "done"];
+  const missingBoard = boardDirs.filter(d => !existsSync(join(serfDir, "board", d)));
+  results.push({
+    name: "board columns exist",
+    passed: missingBoard.length === 0,
+    details: missingBoard.length === 0 ? "backlog, in-progress, review, done present" : `Missing: ${missingBoard.join(", ")}`,
+  });
+
+  results.push({
+    name: "plan.md exists",
+    passed: existsSync(join(serfDir, "plan.md")),
+    details: existsSync(join(serfDir, "plan.md")) ? "Found" : "Missing — edit .serf/plan.md with your mission",
+  });
+
+  return results;
+}
+
+async function handleHealth(args: string[]): Promise<void> {
   const updatePlan = args.includes("--update-plan");
   const jsonOnly = args.includes("--json");
   const strict = args.includes("--strict");
   const runGan = args.includes("--gan");
 
-  const scriptArgs = ["run", "scripts/health-check.ts"];
-  if (updatePlan) scriptArgs.push("--update-plan");
-  if (jsonOnly) scriptArgs.push("--json");
-  if (strict) scriptArgs.push("--strict");
-  if (runGan) scriptArgs.push("--gan");
+  const builtInResults = runBuiltInHealthChecks();
+  const builtInPassed = builtInResults.every(r => r.passed);
 
-  const r = spawnSync("bun", scriptArgs, {
-    encoding: "utf-8",
-    stdio: "inherit",
-    cwd: process.cwd(),
-  });
+  console.log("\n  ═══ SERF HEALTH — BUILT-IN CHECKS ═══════════");
+  for (const r of builtInResults) {
+    const icon = r.passed ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m";
+    console.log(`  ${icon} ${r.name}: ${r.details}`);
+  }
+  console.log(`  ${builtInPassed ? "All" : `${builtInResults.filter(r => r.passed).length}/${builtInResults.length}`} built-in checks passed\n`);
 
-  if (strict && r.status !== 0) process.exit(1);
+  let scriptStatus = 0;
+  const scriptPath = join(process.cwd(), "scripts", "health-check.ts");
+  if (existsSync(scriptPath)) {
+    console.log("  ═══ SERF HEALTH — PROJECT SCRIPT ═══════════");
+    const scriptArgs = ["run", "scripts/health-check.ts"];
+    if (updatePlan) scriptArgs.push("--update-plan");
+    if (jsonOnly) scriptArgs.push("--json");
+    if (strict) scriptArgs.push("--strict");
+    if (runGan) scriptArgs.push("--gan");
+
+    const r = spawnSync("bun", scriptArgs, {
+      encoding: "utf-8",
+      stdio: "inherit",
+      cwd: process.cwd(),
+    });
+    scriptStatus = r.status ?? -1;
+    console.log("");
+  }
+
+  const allPassed = builtInPassed && scriptStatus === 0;
+
+  if (strict && !allPassed) {
+    console.log("  ⚠ Health check failed. Exiting 1 (--strict mode).\n");
+    process.exit(1);
+  }
+
+  if (!allPassed) {
+    console.log("  ⚠ Some checks failed. Run with --strict to propagate exit code.\n");
+  }
 }
 
 // ── DEFAULT ──
 
-async function handleDefault() {
-  const { existsSync } = require("node:fs");
-  const { join } = require("node:path");
-  const { getSerfDir } = require("./v2/paths");
+async function handleDefault(): Promise<void> {
   const serfDir = getSerfDir();
-
   if (!existsSync(serfDir)) {
     console.log("\n  No .serf/ folder in this project. Run: serf init\n");
     return;
   }
-
   await handleBoard([]);
 }
 
 // ── PROVIDERS ──
 
-async function handleProviders(args: string[]) {
-  const { detectProviders, providerInstructions } = require("./v2/providers");
+async function handleProviders(args: string[]): Promise<void> {
   const providers = await detectProviders();
 
   console.log("\n  Available providers:");
@@ -470,8 +399,6 @@ async function handleProviders(args: string[]) {
   }
 
   if (args[0] === "set" && args[1]) {
-    const { loadConfig, saveConfig } = require("./state");
-    const { defaultModelForProvider } = require("./v2/providers");
     const provider = args[1];
     const config = loadConfig();
     config.provider = provider;
@@ -497,13 +424,279 @@ async function handleProviders(args: string[]) {
   console.log("    serf providers              list detected providers");
   console.log("    serf providers set ollama   set project provider");
   console.log("    serf providers instructions show setup help\n");
+  console.log("  RESPAWN:");
+  console.log("    serf respawn critic          Relaunch critic in a new pane");
+  console.log("    serf respawn master          Relaunch master in a new pane");
+  console.log("    serf recover                  Check and recover dead master/critic\n");
+}
+
+// ── RESPAWN ──
+
+async function handleRespawn(args: string[]): Promise<void> {
+  const target = args[0] ?? "critic";
+  const config = loadConfig();
+  const { isHerdrRunning, listWorkspaces, listPanes, splitPane, sendCommand, labelPane, createTab, splitPaneInTab } = await import("./herdr-client");
+
+  if (!isHerdrRunning()) {
+    console.log("  ⚠ herdr is not running. Cannot respawn.");
+    process.exit(1);
+  }
+
+  let workspaces: any[] = [];
+  try {
+    workspaces = await listWorkspaces();
+  } catch (err) {
+    console.log(`  ⚠ Cannot connect to herdr: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  const serfWs = workspaces.find((w: any) => w.label === "serf");
+  if (!serfWs) {
+    console.log("  ⚠ No serf workspace found in herdr.");
+    process.exit(1);
+  }
+
+  const wsId = serfWs.workspace_id;
+  let panes: any[] = [];
+  try {
+    panes = await listPanes(wsId);
+  } catch (err) {
+    console.log(`  ⚠ Cannot list panes: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  if (target === "master") {
+    return await respawnMaster(panes, wsId, config);
+  }
+
+  if (target === "critic") {
+    return await respawnCritic(panes, wsId, config);
+  }
+
+  console.log(`  ⚠ Unknown respawn target: ${target}. Use 'serf respawn master' or 'serf respawn critic'.`);
+}
+
+async function isAgentAlive(paneId: string): Promise<boolean> {
+  const { isAgentAlive: alive } = await import("./herdr-client");
+  return alive(paneId);
+}
+
+function findPanesByRole(panes: any[], role: "master" | "critic", wsId: string): any[] {
+  const matchers = role === "master"
+    ? (p: any) => p.label === "master" || p.display_agent === "master" || p.pane_id === `${wsId}:p1`
+    : (p: any) => p.label === role || p.display_agent === role;
+  return panes.filter(matchers);
+}
+
+async function deduplicatePanes(panes: any[], role: string): Promise<any[]> {
+  const { closePane } = await import("./herdr-client");
+  if (panes.length <= 1) return panes;
+
+  const aliveChecks = await Promise.all(panes.map(async (p) => ({ pane: p, alive: await isAgentAlive(p.pane_id) })));
+  const aliveOnes = aliveChecks.filter((c) => c.alive).map((c) => c.pane);
+  const deadOnes = aliveChecks.filter((c) => !c.alive).map((c) => c.pane);
+
+  for (const dead of deadOnes) {
+    console.log(`  → Closing duplicate dead ${role} pane: ${dead.pane_id}`);
+    try { await closePane(dead.pane_id); } catch {}
+  }
+
+  if (aliveOnes.length > 1) {
+    const [keep, ...extras] = aliveOnes;
+    for (const extra of extras) {
+      console.log(`  → Closing duplicate live ${role} pane: ${extra.pane_id} (keeping ${keep.pane_id})`);
+      try { await closePane(extra.pane_id); } catch {}
+    }
+    return [keep];
+  }
+
+  if (aliveOnes.length === 1) return aliveOnes;
+
+  return deadOnes.length > 0 ? [deadOnes[0]] : [];
+}
+
+async function respawnMaster(panes: any[], wsId: string, config: any): Promise<void> {
+  const { splitPane, sendCommand, labelPane } = await import("./herdr-client");
+  let masterPanes = findPanesByRole(panes, "master", wsId);
+  masterPanes = await deduplicatePanes(masterPanes, "master");
+  const masterPane = masterPanes[0];
+
+  if (masterPane) {
+    const alive = await isAgentAlive(masterPane.pane_id);
+    if (alive) {
+      console.log("  ✓ Master is already running.");
+      return;
+    }
+    console.log(`  → Master pane exists but process is dead. Respawning in same pane...`);
+    await respawnInPane(masterPane.pane_id, "master", config, true);
+    return;
+  }
+
+  console.log("  → No master pane found. Creating new master pane...");
+  const pane = await splitPane(wsId, "right", "master");
+  await respawnInPane(pane.pane_id, "master", config, true);
+}
+
+async function respawnCritic(panes: any[], wsId: string, config: any): Promise<void> {
+  const { splitPane, sendCommand } = await import("./herdr-client");
+  let criticPanes = findPanesByRole(panes, "critic", wsId);
+  criticPanes = await deduplicatePanes(criticPanes, "critic");
+  const existingCritic = criticPanes[0];
+
+  if (existingCritic) {
+    const alive = await isAgentAlive(existingCritic.pane_id);
+    if (alive) {
+      console.log("  ✓ Critic is already running.");
+      return;
+    }
+    console.log(`  → Critic pane exists but process is dead. Respawning in same pane...`);
+    await respawnInPane(existingCritic.pane_id, "critic", config, false);
+    return;
+  }
+
+  console.log("  → No critic pane found. Creating new critic pane...");
+  const pane = await splitPane(wsId, "right", "critic");
+  await respawnInPane(pane.pane_id, "critic", config, false);
+}
+
+async function respawnInPane(paneId: string, role: "master" | "critic", config: any, isMaster: boolean): Promise<void> {
+  const { sendCommand, labelPane } = await import("./herdr-client");
+  const { buildInteractiveInvocation } = await import("./agent-command");
+  const { writeFileSync } = await import("node:fs");
+
+  const agentName = isMaster
+    ? (config?.masterAgent ?? config?.agent ?? "claude")
+    : (config?.criticAgent ?? config?.agent ?? "claude");
+  const model = isMaster
+    ? (config?.masterModel ?? config?.model)
+    : (config?.criticModel ?? config?.model);
+
+  const inv = buildInteractiveInvocation(agentName, model);
+  let argStr = inv.args.map((a: string) => JSON.stringify(a)).join(" ");
+
+  if (agentName === "opencode" && model && config?.provider) {
+    const providerModel = model.includes("/") ? model : `${config.provider}/${model}`;
+    const { buildInteractiveInvocation: buildInv } = await import("./agent-command");
+    const fixedInv = buildInv("opencode", providerModel);
+    argStr = fixedInv.args.map((a: string) => JSON.stringify(a)).join(" ");
+  }
+
+  await labelPane(paneId, role);
+  await sendCommand(paneId, `cd "${process.cwd()}" && ${inv.command} ${argStr}`);
+  await new Promise((r) => setTimeout(r, 10_000));
+
+  const promptFile = join(getSerfDir(), "tmp", `${role}-prompt.md`);
+  const { buildMasterPrompt, buildCriticConversationPrompt } = await import("./prompts");
+  const { getStateSummary } = await import("./state-file");
+  const prompt = isMaster
+    ? buildMasterPrompt(getStateSummary())
+    : buildCriticConversationPrompt();
+  writeFileSync(promptFile, prompt);
+  await sendCommand(paneId, `Read ${promptFile} and follow those instructions.`);
+
+  console.log(`  ✓ ${role.charAt(0).toUpperCase() + role.slice(1)} respawned in pane ${paneId}`);
+}
+
+// ── RECOVER ──
+
+async function handleRecover(): Promise<void> {
+  const { isHerdrRunning, listWorkspaces, listPanes } = await import("./herdr-client");
+  const config = loadConfig();
+
+  if (!isHerdrRunning()) {
+    console.log("  ⚠ herdr is not running. Start it with `herdr` in another terminal, then run `serf recover`.");
+    return;
+  }
+
+  let workspaces: any[] = [];
+  try {
+    workspaces = await listWorkspaces();
+  } catch (err) {
+    console.log(`  ⚠ Cannot connect to herdr: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  const serfWs = workspaces.find((w: any) => w.label === "serf");
+  if (!serfWs) {
+    console.log("  ⚠ No serf workspace found. Run `serf start` to create one.");
+    return;
+  }
+
+  let panes: any[] = [];
+  try {
+    panes = await listPanes(serfWs.workspace_id);
+  } catch (err) {
+    console.log(`  ⚠ Cannot list panes: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  const masterPanes = findPanesByRole(panes, "master", serfWs.workspace_id);
+  const criticPanes = findPanesByRole(panes, "critic", serfWs.workspace_id);
+
+  const masterDuplicates = masterPanes.length > 1;
+  const criticDuplicates = criticPanes.length > 1;
+
+  let dedupedPanes = panes;
+  if (masterDuplicates || criticDuplicates) {
+    console.log("\n  → Deduplicating panes before recovery...");
+    const dedupedMaster = await deduplicatePanes(masterPanes, "master");
+    const dedupedCritic = await deduplicatePanes(criticPanes, "critic");
+    const removed = [...masterPanes, ...criticPanes].filter(
+      (p) => !dedupedMaster.includes(p) && !dedupedCritic.includes(p)
+    );
+    dedupedPanes = panes.filter((p) => !removed.includes(p));
+  }
+
+  const masterPane = findPanesByRole(dedupedPanes, "master", serfWs.workspace_id)[0];
+  const criticPane = findPanesByRole(dedupedPanes, "critic", serfWs.workspace_id)[0];
+
+  let actions: string[] = [];
+
+  if (!masterPane) {
+    actions.push("master: missing — will create");
+  } else {
+    const alive = await isAgentAlive(masterPane.pane_id);
+    if (!alive) actions.push("master: dead — will respawn");
+    else actions.push("master: running ✓");
+  }
+
+  if (!criticPane) {
+    actions.push("critic: missing — will create");
+  } else {
+    const alive = await isAgentAlive(criticPane.pane_id);
+    if (!alive) actions.push("critic: dead — will respawn");
+    else actions.push("critic: running ✓");
+  }
+
+  console.log("\n  ═══ SERF RECOVERY ═══════════════════════");
+  for (const action of actions) {
+    console.log(`  ${action}`);
+  }
+
+  const needsMaster = actions.some(a => a.includes("master") && !a.includes("running"));
+  const needsCritic = actions.some(a => a.includes("critic") && !a.includes("running"));
+
+  if (!needsMaster && !needsCritic) {
+    console.log("\n  ✓ Everything is running. Nothing to recover.\n");
+    return;
+  }
+
+  if (needsMaster) {
+    console.log("\n  → Recovering master...");
+    await respawnMaster(panes, serfWs.workspace_id, config);
+  }
+
+  if (needsCritic) {
+    console.log("  → Recovering critic...");
+    await respawnCritic(panes, serfWs.workspace_id, config);
+  }
+
+  console.log("\n  ✓ Recovery complete.\n");
 }
 
 // ── CONFIG ──
 
-function handleConfig(args: string[]) {
-  const { loadConfig, saveConfig } = require("./state");
-
+function handleConfig(args: string[]): void {
   if (args.length === 0 || args[0] === "show") {
     const config = loadConfig();
     console.log("\n  Serf Config (.serf/config.json):");
@@ -517,11 +710,11 @@ function handleConfig(args: string[]) {
     const value = args[2];
     if (!key || value === undefined) {
       console.log("Usage: serf config set <key> <value>");
-      console.log("Keys: agent, terminal, model, backend, transport, provider, endpoint, apiKey");
+      console.log("Keys: agent, spawnAgent, actorAgent, criticAgent, masterAgent, terminal, model, actorModel, criticModel, masterModel, backend, masterBackend, criticBackend, transport, provider, endpoint, apiKey, maxMemoryMB, memoryWarnMB");
       process.exit(1);
     }
     const config = loadConfig();
-    config[key] = value;
+    (config as any)[key] = value;
     saveConfig(config);
     console.log(`\n  ✓ ${key} = ${value}\n`);
     return;
@@ -532,9 +725,7 @@ function handleConfig(args: string[]) {
 
 // ── AGENTS ──
 
-function handleAgents(args: string[]) {
-  const { loadConfig, saveConfig } = require("./state");
-  const { listAgents } = require("./v2/executor");
+function handleAgents(args: string[]): void {
   const { execSync } = require("node:child_process");
   const agents = listAgents();
 
@@ -546,7 +737,7 @@ function handleAgents(args: string[]) {
     for (const name of agents) {
       let installed = "✗";
       try {
-        execSync(`which ${name}`, { stdio: "ignore" });
+        execSync(`command -v ${name}`, { stdio: "ignore" });
         installed = "✓";
       } catch {}
       const marker = name === current ? " ← current" : "";
@@ -574,23 +765,22 @@ function handleAgents(args: string[]) {
 
 // ── HELP ──
 
-function printHelp() {
+function printHelp(): void {
   console.log(`
 SERF — dark factory for coding agents
 
 USAGE:
   serf .                             Init (if needed) and start in current project
-  serf .                             Init (if needed) and start in current project
   serf init                          Create .serf/ in current project
   serf task "do something"           Add a task to the board
-  serf start                         Launch master agent — surveys project, talks with you, processes tasks
-  serf process [--once] [--budget N] Run the board loop in headless mode
+  serf start [--once] [--budget N]   Launch master agent — surveys project, processes tasks
+  serf process [--once] [--budget N]  Same as start (headless board loop)
   serf board                         Show the kanban board
+  serf board move <id> <column>      Move a card between columns
   serf agents [list|use <name>]      List or select coding agent
   serf providers [set <name>]        List or set LLM provider
   serf config [show|set <k> <v>]     Show or set config
-  serf health [--gan] [--strict]     Run build + test + typecheck (+ GAN)
-  serf board move <id> <column>      Move a card between columns
+  serf health [--gan] [--strict]     Run build + test + typecheck
 
 PROVIDERS:
   serf supports any LLM backend you can reach:
@@ -598,24 +788,13 @@ PROVIDERS:
   - vLLM / OpenAI-proxy: start server; serf config set endpoint http://localhost:8000/v1
   - Anthropic API:       ANTHROPIC_API_KEY=... serf config set provider anthropic
   - OpenAI:              OPENAI_API_KEY=... serf config set provider openai
-  - Claude Code CLI:       claude /login; serf config set agent claude
-  - Claude Desktop:      use an MCP server to expose it to serf
+  - Claude Code CLI:     claude /login; serf config set agent claude
 
   The project config (.serf/config.json) holds provider, model, endpoint, apiKey.
   Serf picks the best available provider during init if none is configured.
 
-INTERACTIVE MODE:
-  serf .                             The default way to use serf. Initialize if needed, then launch
-                                     your coding agent as the master serf. It surveys the project,
-                                     shows you what's going on, discusses what to work on, writes the
-                                     task to the board, and processes it. After each task it asks
-                                     "what's next?"
-
-  serf start                         Same as above, but only starts (does not init).
-
 AGENTS:
   claude, opencode, aider, pi, hermes, codex (headless — run in terminal, capture output)
-  cursor, code (interactive — open editor, user works)
 
 THE PROTOCOL:
   Tell your agent: "Read SERF.md and follow the protocol."
@@ -630,7 +809,78 @@ CONFIGURATION:
 `);
 }
 
-main().catch(err => {
+// ── IDENTITIES ──
+
+function masterIdentity(): string {
+  return `# master
+
+## Mission
+Orchestrate the dark factory. Survey the project, talk with the user, write tasks, spawn serfs, ensure convergence.
+
+## Persona
+Clear, strategic, autonomous. Asks good questions. Writes evaluable goals and levers.
+
+## Lever
+- .serf/ folder (board, knowledge, identities, events)
+- User conversation
+- callLLM for classification and planning
+
+## Measurement
+- Tasks written per session: >0
+- Tasks that pass critic: >70%
+- User refinement rate: <30%
+
+## Fate
+If the factory is confusing, my protocol is wrong, not me.
+`;
+}
+
+function actorIdentity(): string {
+  return `# actor
+
+## Mission
+Execute tasks. Read the .serf/ folder, understand the task, do the work, write results.
+
+## Persona
+Direct, capable, autonomous. Reads the folder, does the work, doesn't stop to ask.
+
+## Lever
+- .serf/ folder (board, knowledge, serfs, plan)
+- File system
+- Build and test commands
+
+## Measurement
+- GAN critic pass rate: >70%
+- Task completion: >80%
+
+## Fate
+If I fail 3 times, the task description is bad, not me. The critic may spawn a specialized serf to handle what I can't.
+`;
+}
+
+function criticIdentity(): string {
+  return `# critic
+
+## Mission
+Evaluate actor output adversarially. Find real problems. Don't be lenient.
+
+## Persona
+Hostile, precise, adversarial. Would you accept this from a subordinate? If not, fail it.
+
+## Lever
+- callLLM for evaluation
+- .serf/knowledge/ for standards and past failures
+
+## Measurement
+- False pass rate: <10% (if I pass it, it should actually be good)
+- High-confidence fail accuracy: >90%
+
+## Fate
+If I keep passing bad work, I'm not adversarial enough. If I keep failing good work, my criteria are wrong.
+`;
+}
+
+main().catch((err) => {
   console.error("Serf error:", err.message);
   process.exit(1);
 });

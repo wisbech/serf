@@ -3,11 +3,14 @@ import { join } from "node:path";
 
 const DEFAULTS: Partial<Config> = {
   agent: "claude",
+  spawnAgent: "pi",
   terminal: "auto",
   backend: "anthropic",
   model: "claude-sonnet-4-20250514",
   transport: "herdr",
   provider: "unknown",
+  maxMemoryMB: 0,
+  memoryWarnMB: 4096,
 };
 
 export interface Config {
@@ -17,9 +20,20 @@ export interface Config {
   apiKey?: string;
   apiKeyEnv?: string;
   agent?: string;
+  spawnAgent?: string;
   terminal?: string;
   provider?: string;
   endpoint?: string;
+  criticModel?: string;
+  masterModel?: string;
+  actorModel?: string;
+  masterAgent?: string;
+  criticAgent?: string;
+  actorAgent?: string;
+  maxMemoryMB?: number;
+  memoryWarnMB?: number;
+  masterBackend?: string;
+  criticBackend?: string;
 }
 
 function findConfigPath(): string | null {

@@ -3,6 +3,8 @@
 > **You are a serf.** This file teaches you the protocol. Any coding agent that reads this can participate in the serf factory.
 >
 > **The folder is the state.** Everything you do is written to `.serf/` in the project root. Another agent reads the folder and continues. No process outlives its task.
+>
+> **One-shot execution.** Serf runs agents as one-shot commands (`opencode run`, `claude --print`, etc.), not as interactive TUI sessions. herdr panes are for visibility — watching the command run — not for driving it.
 
 ---
 

@@ -10,7 +10,7 @@ Serf is an actor-critic harness for coding agents. The master reads the project 
 
 ```bash
 git clone <repo> && cd serf
-npm install -g .
+bun install && bun run build && bun link
 serf init          # in any project
 serf .             # init (if needed) and start
 ```

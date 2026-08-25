@@ -25,6 +25,10 @@ export interface Card {
   budgetLimit?: number;
   createdAt: string;
   updatedAt: string;
+  decisions?: string[];
+  verification?: string[];
+  prdPath?: string;
+  blockedBy?: string[];
 }
 
 function ensureBoard(): void {
@@ -178,6 +182,46 @@ export function deleteCard(id: string): boolean {
   return true;
 }
 
+export function computeFrontier(): Card[] {
+  ensureBoard();
+  const allCards = listCards();
+  const doneIds = new Set(allCards.filter(c => c.column === "done").map(c => c.id));
+  const inProgressIds = new Set(allCards.filter(c => c.column === "in-progress").map(c => c.id));
+
+  const frontier: Card[] = [];
+  for (const card of allCards) {
+    if (card.column !== "backlog") continue;
+    if (inProgressIds.has(card.id)) continue;
+    if (!card.blockedBy || card.blockedBy.length === 0) {
+      frontier.push(card);
+      continue;
+    }
+    const allBlockersClosed = card.blockedBy.every(id => doneIds.has(id));
+    if (allBlockersClosed) {
+      frontier.push(card);
+    }
+  }
+
+  return frontier.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export function unblockDependents(closedCardId: string): Card[] {
+  const allCards = listCards();
+  const unblocked: Card[] = [];
+  for (const card of allCards) {
+    if (!card.blockedBy || !card.blockedBy.includes(closedCardId)) continue;
+    const allBlockersClosed = card.blockedBy.every(id => allCards.find(c => c.id === id)?.column === "done");
+    if (allBlockersClosed && card.column === "backlog") {
+      card.blockedBy = card.blockedBy.filter(id => id !== closedCardId);
+      if (card.blockedBy.length === 0) card.blockedBy = undefined;
+      card.updatedAt = new Date().toISOString();
+      writeCard(card);
+      unblocked.push(card);
+    }
+  }
+  return unblocked;
+}
+
 export function setFeedback(id: string, feedback: "accept" | "refine"): Card | null {
   const card = readCard(id);
   if (!card) return null;
@@ -211,6 +255,15 @@ ${card.acceptance.map(a => `- ${a}`).join("\n")}
 ## Context
 ${card.context ?? ""}
 
+## Blocked-by
+${card.blockedBy?.map(b => `- ${b}`).join("\n") ?? ""}
+
+## Decisions
+${card.decisions?.map(d => `- ${d}`).join("\n") ?? ""}
+
+## Verification
+${card.verification?.map(v => `- ${v}`).join("\n") ?? ""}
+
 ## Quality
 ${card.quality ?? "not scored"}
 
@@ -241,6 +294,10 @@ function markdownToCard(raw: string, id: string, column: Column): Card {
   const createdMatch = raw.match(/created: (.+)/m);
   const updatedMatch = raw.match(/updated: (.+)/m);
 
+  const blockedByMatch = raw.match(/## Blocked-by\n([\s\S]*?)(?=\n## )/m);
+  const decisionsMatch = raw.match(/## Decisions\n([\s\S]*?)(?=\n## )/m);
+  const verificationMatch = raw.match(/## Verification\n([\s\S]*?)(?=\n## )/m);
+
   return {
     id,
     title: titleMatch?.[1]?.trim() ?? id,
@@ -253,6 +310,9 @@ function markdownToCard(raw: string, id: string, column: Column): Card {
       ? acceptanceMatch[1].split("\n").map(l => l.replace(/^-\s*/, "").trim()).filter(Boolean)
       : ["Source files were edited to implement the change", "Tests pass or verification command succeeds"],
     context: contextMatch?.[1]?.trim() || undefined,
+    blockedBy: blockedByMatch ? blockedByMatch[1].split("\n").map(l => l.replace(/^-\s*/, "").trim()).filter(Boolean) : undefined,
+    decisions: decisionsMatch ? decisionsMatch[1].split("\n").map(l => l.replace(/^-\s*/, "").trim()).filter(Boolean) : undefined,
+    verification: verificationMatch ? verificationMatch[1].split("\n").map(l => l.replace(/^-\s*/, "").trim()).filter(Boolean) : undefined,
     quality: qualityMatch?.[1]?.trim() === "not scored" ? undefined : parseFloat(qualityMatch?.[1] ?? "0") || undefined,
     feedback: feedbackMatch?.[1]?.trim() === "none" ? null : (feedbackMatch?.[1]?.trim() as "accept" | "refine" | null),
     budgetUsed: budgetMatch ? parseInt(budgetMatch[1]) : undefined,

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildCritiquePrompt, buildPlanCritiquePrompt, parseVerdict, isPass, isHighConfidenceFail, classifyVerdict } from "../src/v2/critic";
+import { buildCritiquePrompt, buildPlanCritiquePrompt, parseVerdict, isPass, isHighConfidenceFail, classifyVerdict } from "../src/critic";
 
 describe("Critic", () => {
   test("buildCritiquePrompt includes task and output", () => {

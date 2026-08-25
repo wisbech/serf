@@ -1,4 +1,6 @@
 import { callLLM, type CallLLMResult } from "./llm";
+import type { TaskResourceSummary } from "./resource-gauge";
+import { collectStyleGuidesForOutput, formatStyleBlock } from "./style";
 
 export interface CriterionAnswer {
   criterion: string;
@@ -14,16 +16,25 @@ export interface CriticVerdict {
   evidence?: string[];
   criterionAnswers?: CriterionAnswer[];
   curiosity?: string[];
+  resourceFlag?: string;
 }
 
 // ── PROMPT ──
 
-export function buildCritiquePrompt(task: string, output: string, acceptance?: string[]): string {
+export function buildCritiquePrompt(task: string, output: string, acceptance?: string[], resourceSummary?: TaskResourceSummary): string {
   const criteria = acceptance && acceptance.length > 0
     ? acceptance
     : ["Output meets the task requirement"];
 
   const criteriaBlock = criteria.map((c, i) => `CRITERION ${i + 1}: ${c}`).join("\n");
+
+  let resourceBlock = "";
+  if (resourceSummary && resourceSummary.attempts.length > 0) {
+    resourceBlock = `\nRESOURCE STRAIN (evaluate efficiency of the approach):\n${formatResourceForCritic(resourceSummary)}\n\nIf the approach is resource-divergent (memory trending upward across attempts), note this in your reasoning. An approach that uses progressively more memory is getting worse, not better.\n`;
+  }
+
+  const styleGuides = collectStyleGuidesForOutput(output);
+  const styleBlock = formatStyleBlock(styleGuides);
 
   return `You are a hostile adversary. Your job is to FIND REASONS TO FAIL this output. You are not fair. You are not balanced. You are searching for any divergence between what was requested and what was delivered.
 
@@ -31,6 +42,8 @@ You do NOT suggest improvements. You do NOT give partial credit. You ONLY identi
 
 ANTI-CHEAT RULE: If the output only describes what would be done, or only edits .md sidecar files, answer NO for every criterion about source file changes. Summaries and plans are NOT implementation.
 
+HYGIENE RULE: If the output installed anything globally (npm install -g, pip install --user, brew install, cargo install, curl|bash, sudo), answer NO for every criterion. Global installs are never acceptable. Agents must use the project's local package manager and project manifest only.
+${resourceBlock}${styleBlock}
 TASK:
 ${task}
 
@@ -57,9 +70,22 @@ VERDICT: pass | fail
 REASONING: [one sentence: which criteria failed and why]`;
 }
 
-export function buildPlanCritiquePrompt(task: string, plan: string): string {
-  return `You are the critic evaluating an actor's plan before execution.
+function formatResourceForCritic(summary: TaskResourceSummary): string {
+  const lines: string[] = [];
+  lines.push(`Peak RSS: ${summary.peakRSSMB} MB`);
+  lines.push(`Trend: ${summary.trend}`);
+  for (const a of summary.attempts) {
+    lines.push(`  Attempt ${a.attempt}: peak ${a.peakRSSMB} MB, delta ${a.deltaRSSMB >= 0 ? "+" : ""}${a.deltaRSSMB} MB, ${(a.wallClockMs / 1000).toFixed(1)}s`);
+  }
+  return lines.join("\n");
+}
 
+export function buildPlanCritiquePrompt(task: string, plan: string): string {
+  const styleGuides = collectStyleGuidesForOutput(plan);
+  const styleBlock = formatStyleBlock(styleGuides);
+
+  return `You are the critic evaluating an actor's plan before execution.
+${styleBlock}
 TASK:
 ${task}
 
@@ -71,6 +97,7 @@ Evaluate the plan:
 2. Feasibility: Can each step be executed by a single LLM?
 3. Order: Are the steps in the right sequence?
 4. Risk: Does the plan identify uncertain or risky steps?
+5. Style: Does the plan respect the style guide (if present)?
 
 Explore the plan curiously. Note where you are uncertain about whether a step will work. If you need the actor to clarify something, say so.
 
@@ -199,10 +226,15 @@ export async function critique(
   task: string,
   output: string,
   acceptance?: string[],
+  _critiqueFn?: any,
+  resourceSummary?: TaskResourceSummary,
 ): Promise<{ verdict: CriticVerdict; result: CallLLMResult }> {
-  const prompt = buildCritiquePrompt(task, output, acceptance);
-  const result = await callLLM(prompt);
+  const prompt = buildCritiquePrompt(task, output, acceptance, resourceSummary);
+  const result = await callLLM(prompt, { useCriticModel: true });
   const verdict = parseVerdict(result.text);
+  if (resourceSummary && resourceSummary.trend === "diverging") {
+    verdict.resourceFlag = `Resource-divergent: peak ${resourceSummary.peakRSSMB} MB, trend ${resourceSummary.trend}`;
+  }
   return { verdict, result };
 }
 
@@ -211,7 +243,7 @@ export async function critiquePlan(
   plan: string,
 ): Promise<{ verdict: CriticVerdict; result: CallLLMResult }> {
   const prompt = buildPlanCritiquePrompt(task, plan);
-  const result = await callLLM(prompt);
+  const result = await callLLM(prompt, { useCriticModel: true });
   const verdict = parseVerdict(result.text);
   return { verdict, result };
 }

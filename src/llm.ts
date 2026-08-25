@@ -1,20 +1,23 @@
-import { loadConfig } from "../state";
+import { loadConfig } from "./state";
 
 export interface BudgetConfig {
   maxTokensPerHarvest: number;
   costPerToken: number;
   maxSpendPerHarvest: number;
+  maxMemoryMB?: number;
 }
 
 export const DEFAULT_BUDGET_CONFIG: BudgetConfig = {
   maxTokensPerHarvest: 100_000,
   costPerToken: 0.00001,
   maxSpendPerHarvest: 5.0,
+  maxMemoryMB: 0,
 };
 
 export class BudgetTracker {
   private tokensUsed = 0;
   private totalCost = 0;
+  private peakMemoryMB = 0;
 
   constructor(private config: BudgetConfig = DEFAULT_BUDGET_CONFIG) {}
 
@@ -23,8 +26,19 @@ export class BudgetTracker {
     this.totalCost += tokens * this.config.costPerToken;
   }
 
+  trackMemory(rssMB: number) {
+    if (rssMB > this.peakMemoryMB) this.peakMemoryMB = rssMB;
+  }
+
   isOverBudget(): boolean {
-    return this.tokensUsed > this.config.maxTokensPerHarvest || this.totalCost > this.config.maxSpendPerHarvest;
+    const overTokens = this.tokensUsed > this.config.maxTokensPerHarvest;
+    const overCost = this.totalCost > this.config.maxSpendPerHarvest;
+    const overMemory = this.config.maxMemoryMB && this.config.maxMemoryMB > 0 && this.peakMemoryMB > this.config.maxMemoryMB;
+    return overTokens || overCost || overMemory === true;
+  }
+
+  isMemoryStrained(memoryWarnMB: number): boolean {
+    return memoryWarnMB > 0 && this.peakMemoryMB > memoryWarnMB;
   }
 
   getStats() {
@@ -32,6 +46,7 @@ export class BudgetTracker {
       tokensUsed: this.tokensUsed,
       totalCost: this.totalCost,
       budgetRemaining: this.config.maxSpendPerHarvest - this.totalCost,
+      peakMemoryMB: this.peakMemoryMB,
     };
   }
 }
@@ -48,10 +63,13 @@ function detectGibberish(text: string): boolean {
 
 export interface CallLLMOptions {
   model?: string;
+  backend?: string;
   systemPrompt?: string;
   budgetTracker?: BudgetTracker;
   maxTokens?: number;
   timeoutMs?: number;
+  useCriticModel?: boolean;
+  useMasterBackend?: boolean;
 }
 
 export interface CallLLMResult {
@@ -63,8 +81,19 @@ export interface CallLLMResult {
 
 export async function callLLM(prompt: string, options: CallLLMOptions = {}): Promise<CallLLMResult> {
   const config = loadConfig();
-  const backend = config?.backend || "ollama";
-  const model = options.model || config?.model || "qwen3.5";
+  const backend = options.backend
+    || (options.useCriticModel && config?.criticBackend ? config.criticBackend : undefined)
+    || (options.useMasterBackend && config?.masterBackend ? config.masterBackend : undefined)
+    || config?.backend
+    || "ollama";
+  let model = options.model
+    || (options.useCriticModel && config?.criticModel ? config.criticModel : config?.model)
+    || "qwen3.5";
+
+  if (model.includes("/")) {
+    model = model.split("/").slice(1).join("/");
+  }
+
   const warnings: string[] = [];
 
   const promptTokens = estimateTokens(prompt);
@@ -79,7 +108,7 @@ export async function callLLM(prompt: string, options: CallLLMOptions = {}): Pro
 
   let text = "";
 
-  if (backend === "ollama") {
+  if (backend === "ollama" || backend === "local") {
     const body: any = { model, prompt, stream: false };
     if (options.systemPrompt) body.system = options.systemPrompt;
 

@@ -1,6 +1,6 @@
 {
   "name": "serf",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Serf — dark factory for coding agents. Master serf + GAN critic + board. The folder is the state.",
   "type": "module",
   "bin": {

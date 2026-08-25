@@ -5,7 +5,7 @@ import {
   buildAgentCommand,
   providerInstructions,
   listProviders,
-} from "../src/v2/providers";
+} from "../src/providers";
 
 describe("Providers", () => {
   it("detects login markers", () => {

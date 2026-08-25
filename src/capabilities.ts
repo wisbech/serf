@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
-import { isHerdrRunning } from "./herdr";
+import { isHerdrRunning } from "./herdr-client";
 
 export interface Capabilities {
   agents: string[];

@@ -1,10 +1,13 @@
 import { critique as defaultCritique, type CriticVerdict, type CriterionAnswer } from "./critic";
 import type { CallLLMResult } from "./llm";
+import type { TaskResourceSummary } from "./resource-gauge";
 
 export type CritiqueFn = (
   task: string,
   output: string,
   acceptance?: string[],
+  _critiqueFn?: any,
+  resourceSummary?: TaskResourceSummary,
 ) => Promise<{ verdict: CriticVerdict; result: CallLLMResult }>;
 
 export type Effort = "quick" | "standard" | "thorough" | "maximum";
@@ -45,13 +48,14 @@ export async function critiqueMultipass(
   acceptance: string[],
   effort: Effort = "standard",
   critiqueFn: CritiqueFn = defaultCritique,
+  resourceSummary?: TaskResourceSummary,
 ): Promise<{ verdict: MultiPassVerdict; results: CallLLMResult[] }> {
   const n = EFFORT_PASSES[effort];
   const verdicts: CriticVerdict[] = [];
   const results: CallLLMResult[] = [];
 
   for (let i = 0; i < n; i++) {
-    const { verdict, result } = await critiqueFn(task, output, acceptance);
+    const { verdict, result } = await critiqueFn(task, output, acceptance, undefined, resourceSummary);
     verdicts.push(verdict);
     results.push(result);
   }

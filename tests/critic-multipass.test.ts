@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { critiqueMultipass, classifyMultipass, EFFORT_PASSES, type MultiPassVerdict, type CritiqueFn } from "../src/v2/critic_multipass";
-import type { CriticVerdict } from "../src/v2/critic";
+import { critiqueMultipass, classifyMultipass, EFFORT_PASSES, type MultiPassVerdict, type CritiqueFn } from "../src/critic_multipass";
+import type { CriticVerdict } from "../src/critic";
 
 function makeVerdict(verdict: "pass" | "fail", confidence: number, criterionAnswers?: { criterion: string; answer: "YES" | "NO" | "CANNOT_EVALUATE"; evidence: string }[]): CriticVerdict {
   return {
