@@ -465,7 +465,7 @@ export async function launchInteractiveMasterConversation(
     await herdr.sendCommand(criticPaneId, `Read ${criticPromptFile} and follow those instructions. The harness will send you proposals when they are ready.`);
 
     console.log(`  → Master launched in left pane, critic in right pane.`);
-    console.log(`  → Event-driven loop: master writes proposal → harness kicks critic → critic writes critique → harness notifies master.`);
+    console.log(`  → Event-driven loop: agents emit events via 'serf emit' → harness mediates.`);
     console.log(`  → Talk to either pane. Exit both agents when done.\n`);
 
     const { listCards } = await import("./board");
@@ -474,37 +474,26 @@ export async function launchInteractiveMasterConversation(
 
     const proposalFile = join(serfTmp(), "master-proposal.md");
     const critiqueFile = join(serfTmp(), "critique.md");
-    let lastProposalMtime = 0;
-    let lastCritiqueMtime = 0;
-    try { lastProposalMtime = existsSync(proposalFile) ? statSync(proposalFile).mtimeMs : 0; } catch {}
-    try { lastCritiqueMtime = existsSync(critiqueFile) ? statSync(critiqueFile).mtimeMs : 0; } catch {}
 
-    const pollInterval = setInterval(async () => {
-      let proposalMtime = 0;
-      let critiqueMtime = 0;
-      try { proposalMtime = existsSync(proposalFile) ? statSync(proposalFile).mtimeMs : 0; } catch {}
-      try { critiqueMtime = existsSync(critiqueFile) ? statSync(critiqueFile).mtimeMs : 0; } catch {}
+    const unsubProposal = subscribeFromFile("proposal.written", (e) => {
+      console.log(`  → proposal.written event — kicking critic to review...`);
+      herdr.sendCommand(
+        criticPaneId,
+        `Read ${proposalFile} and write your evaluation to ${critiqueFile}. Be adversarial. When done, run: serf emit critique.written file=.serf/tmp/critique.md`,
+      ).catch(() => {});
+    });
 
-      if (proposalMtime > 0 && proposalMtime !== lastProposalMtime) {
-        lastProposalMtime = proposalMtime;
-        appendEvent("proposal.written", { file: proposalFile, mtime: proposalMtime });
-        console.log(`  → proposal.written event — kicking critic to review...`);
-        herdr.sendCommand(
-          criticPaneId,
-          `Read ${proposalFile} and write your evaluation to ${critiqueFile}. Be adversarial. End with SERF_CRITIQUE_DONE.`,
-        ).catch(() => {});
-      }
+    const unsubCritique = subscribeFromFile("critique.written", (e) => {
+      console.log(`  → critique.written event — notifying master...`);
+      herdr.sendCommand(
+        opts.rootPaneId!,
+        `Read ${critiqueFile}. The critic has reviewed your proposal. Revise if needed (then run serf emit proposal.written again), or write a card to .serf/board/backlog/ if you agree (then run serf emit card.written).`,
+      ).catch(() => {});
+    });
 
-      if (critiqueMtime > 0 && critiqueMtime !== lastCritiqueMtime) {
-        lastCritiqueMtime = critiqueMtime;
-        appendEvent("critique.written", { file: critiqueFile, mtime: critiqueMtime });
-        console.log(`  → critique.written event — notifying master...`);
-        herdr.sendCommand(
-          opts.rootPaneId!,
-          `Read ${critiqueFile}. The critic has reviewed your proposal. Revise if needed, or write a card to .serf/board/backlog/ if you agree.`,
-        ).catch(() => {});
-      }
-    }, 3000);
+    const unsubCard = subscribeFromFile("card.written", (e) => {
+      console.log(`  → card.written event — checking board for new cards...`);
+    });
 
     await new Promise<void>((resolve) => {
       let done = false;
@@ -533,11 +522,10 @@ export async function launchInteractiveMasterConversation(
       } catch {}
 
       const exitInterval = setInterval(async () => {
-        if (done) { clearInterval(exitInterval); clearInterval(pollInterval); return; }
+        if (done) { clearInterval(exitInterval); return; }
 
         if (checkAndResolve()) {
           clearInterval(exitInterval);
-          clearInterval(pollInterval);
           return;
         }
 
@@ -551,23 +539,24 @@ export async function launchInteractiveMasterConversation(
               console.log(`  → Both agents exited.`);
               done = true;
               clearInterval(exitInterval);
-              clearInterval(pollInterval);
               resolve();
             }
           }).catch(() => {
             done = true;
             clearInterval(exitInterval);
-            clearInterval(pollInterval);
             resolve();
           });
         } catch {
           done = true;
           clearInterval(exitInterval);
-          clearInterval(pollInterval);
           resolve();
         }
       }, 60_000);
     });
+
+    unsubProposal();
+    unsubCritique();
+    unsubCard();
 
     const finalCards = listCards("backlog");
     return { ok: true, cardsWritten: finalCards.length, output: `Conversation ended. ${finalCards.length} cards on board.` };

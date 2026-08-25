@@ -9,15 +9,17 @@ export function buildMasterPrompt(stateSummary: string): string {
 2. Read .serf/plan.md and skim .serf/board/.
 3. Read .serf/STATE.md — this is the accumulated memory from past sessions. Don't repeat mistakes listed there.
 4. Write an honest overview to .serf/tmp/master-proposal.md: what the project is, what works, what's broken, what's interesting.
-5. Propose 2-3 things worth working on, with your opinion on each. Be specific — reference real files.
-6. The critic (in the pane next to you) will read your proposal and push back. Listen to their feedback.
-7. If you and the critic agree on a task, write a card to .serf/board/backlog/ (format below).
-8. If you disagree, revise the proposal and try again.
-9. Before you exit, update .serf/STATE.md with what you learned this session.
+5. **Run \`serf emit proposal.written file=.serf/tmp/master-proposal.md\`** — this notifies the critic to review your proposal.
+6. Propose 2-3 things worth working on, with your opinion on each. Be specific — reference real files.
+7. The critic (in the pane next to you) will read your proposal and push back. The harness will notify you when the critique is ready — read .serf/tmp/critique.md when it arrives.
+8. If you and the critic agree on a task, write a card to .serf/board/backlog/ (format below).
+9. If you disagree, revise the proposal and re-emit the event.
+10. Before you exit, update .serf/STATE.md with what you learned this session.
 
 ## Harness commands (you can run these via shell)
 You have shell access. These serf commands are available to you at any time:
 - \`serf board\` — show the current board state (frontier cards marked with ★)
+- \`serf emit <type> [key=value ...]\` — emit an event to the harness (CRITICAL: use this to signal completions)
 - \`serf recover\` — check and recover dead master/critic panes
 - \`serf respawn critic\` — respawn the critic if it died
 - \`serf respawn master\` — respawn yourself if needed
@@ -25,6 +27,11 @@ You have shell access. These serf commands are available to you at any time:
 - \`serf config show\` — see current configuration
 - \`serf config set <key> <value>\` — change configuration
 - \`serf health\` — run build + test + typecheck
+
+**Event protocol:**
+- After writing .serf/tmp/master-proposal.md → run \`serf emit proposal.written file=.serf/tmp/master-proposal.md\`
+- After writing a card to .serf/board/backlog/ → run \`serf emit card.written\`
+- The harness will notify you when the critic writes a critique — you don't need to poll.
 
 If the critic pane is dead or unresponsive, run \`serf respawn critic\` to bring it back.
 If you need to check the board, run \`serf board\`.
@@ -76,15 +83,16 @@ export function buildCriticConversationPrompt(): string {
 
 ## What to do
 1. Read the project briefly to understand context.
-2. Wait for .serf/tmp/master-proposal.md to appear (the master is writing it).
-3. Read it. Evaluate each proposal:
+2. Wait for the harness to notify you — it will send you the master's proposal when it's ready. You don't need to poll files.
+3. Read the proposal at .serf/tmp/master-proposal.md. Evaluate each proposal:
    - Is it grounded in the actual codebase? Check the files mentioned.
    - Are the acceptance criteria actually checkable?
    - Is the scope right — too big, too small, too vague?
    - Is this the highest-value work, or is there something more urgent?
 4. Write your evaluation to .serf/tmp/critique.md. Be specific. Push back on weak proposals.
-5. If a proposal is good, say so. If it's bad, say why. If the scope is wrong, suggest a better cut.
-6. The master will read your critique and revise. You can iterate.
+5. **Run \`serf emit critique.written file=.serf/tmp/critique.md\`** — this notifies the master that your critique is ready.
+6. If a proposal is good, say so. If it's bad, say why. If the scope is wrong, suggest a better cut.
+7. The master will read your critique and revise or write a card. The harness will notify you if a new proposal arrives.
 
 ## Tone
 Adversarial but constructive. You're the person who asks "but what about X?" Don't be nice — be right. If the master proposes something vague, demand specifics. If they miss something obvious, point it out.
@@ -98,8 +106,14 @@ Adversarial but constructive. You're the person who asks "but what about X?" Don
 ## Harness commands (you can run these via shell)
 You have shell access. These serf commands are available:
 - \`serf board\` — show the current board state
+- \`serf emit <type> [key=value ...]\` — emit an event to the harness (CRITICAL: use this to signal completions)
 - \`serf respawn master\` — respawn the master if it died
 - \`serf health\` — run build + test + typecheck
+
+**Event protocol:**
+- After writing .serf/tmp/critique.md → run \`serf emit critique.written file=.serf/tmp/critique.md\`
+- The harness will notify you when the master writes a new proposal — you don't need to poll.
+
 If the master pane is dead, run \`serf respawn master\` to bring it back.`;
 }
 
@@ -133,7 +147,8 @@ export function buildAgentPrompt(card: Card, serf: SerfIdentity, feedback: strin
 1. Edit the actual source files to implement the change.
 2. Run the verification command (test, build, lint) and make sure it passes.
 3. Write what you did to .serf/board/in-progress/${card.id}-output.md — include: which files changed, what the test output was.
-4. End the output file with the line SERF_TASK_DONE.
+4. **Run \`serf emit serf.completed card=${card.id}\`** — this notifies the harness you're done.
+5. End the output file with the line SERF_TASK_DONE.
 
 ## Rules
 - NEVER install globally. No \`npm install -g\`, no \`bun add -g\`, no \`pip install --user\`, no \`cargo install\`, no \`brew install\` for project deps. Always use the project's local package manager.

@@ -37,6 +37,7 @@ async function main() {
     case "agents":   handleAgents(args); return;
     case "providers": await handleProviders(args); return;
     case "health":   await handleHealth(args); return;
+    case "emit":     handleEmit(args); return;
     case "help":
     case "--help":
     case "-h":       printHelp(); return;
@@ -372,6 +373,29 @@ async function handleHealth(args: string[]): Promise<void> {
   if (!allPassed) {
     console.log("  ⚠ Some checks failed. Run with --strict to propagate exit code.\n");
   }
+}
+
+// ── EMIT ──
+
+function handleEmit(args: string[]): void {
+  const { appendEvent } = require("./events");
+  const type = args[0];
+  if (!type) {
+    console.log("Usage: serf emit <event-type> [key=value ...]");
+    console.log("Example: serf emit proposal.written file=.serf/tmp/master-proposal.md");
+    process.exit(1);
+  }
+  const payload: Record<string, unknown> = {};
+  for (const arg of args.slice(1)) {
+    const eq = arg.indexOf("=");
+    if (eq > 0) {
+      const key = arg.slice(0, eq);
+      const value = arg.slice(eq + 1);
+      payload[key] = value;
+    }
+  }
+  appendEvent(type, payload);
+  console.log(`  ✓ emitted ${type}`);
 }
 
 // ── DEFAULT ──
@@ -781,6 +805,7 @@ USAGE:
   serf providers [set <name>]        List or set LLM provider
   serf config [show|set <k> <v>]     Show or set config
   serf health [--gan] [--strict]     Run build + test + typecheck
+  serf emit <type> [key=value ...]   Emit an event to the harness
 
 PROVIDERS:
   serf supports any LLM backend you can reach:
