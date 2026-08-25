@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { getSerfDir } from "./paths";
@@ -38,6 +38,7 @@ async function main() {
     case "providers": await handleProviders(args); return;
     case "health":   await handleHealth(args); return;
     case "emit":     handleEmit(args); return;
+    case "traj":     handleTraj(args); return;
     case "help":
     case "--help":
     case "-h":       printHelp(); return;
@@ -112,6 +113,16 @@ function handleInit(): void {
   writeFileSync(join(dir, "serfs", "master.md"), masterIdentity());
   writeFileSync(join(dir, "serfs", "actor.md"), actorIdentity());
   writeFileSync(join(dir, "serfs", "critic.md"), criticIdentity());
+  writeFileSync(join(dir, "serfs", "master.subs.json"), JSON.stringify([
+    {types: ["critique", "verdict", "serf.completed"], trigger_self: false, watchdog_secs: 300},
+  ], null, 2));
+  writeFileSync(join(dir, "serfs", "critic.subs.json"), JSON.stringify([
+    {types: ["proposal", "work"], trigger_self: false, watchdog_secs: 300},
+  ], null, 2));
+  writeFileSync(join(dir, "serfs", "actor.subs.json"), JSON.stringify([
+    {types: ["task"], trigger_self: false, watchdog_secs: 600},
+  ], null, 2));
+  writeFileSync(join(dir, "trajectory.jsonl"), "");
 
   console.log("\n  ✓ .serf/ created");
   console.log("    ├── board/         (backlog, in-progress, review, done)");
@@ -378,15 +389,31 @@ async function handleHealth(args: string[]): Promise<void> {
 // ── EMIT ──
 
 function handleEmit(args: string[]): void {
-  const { appendEvent } = require("./events");
+  const { appendEvent, appendTrajectory } = require("./events");
   const type = args[0];
   if (!type) {
-    console.log("Usage: serf emit <event-type> [key=value ...]");
-    console.log("Example: serf emit proposal.written file=.serf/tmp/master-proposal.md");
+    console.log("Usage: serf emit <event-type> [key=value ...] [--source <name>] [--stdout <text|file>]");
+    console.log("Example: serf emit proposal.written file=.serf/tmp/master-proposal.md --source master");
     process.exit(1);
   }
+
+  let source: string | undefined;
+  let stdout: string | undefined;
   const payload: Record<string, unknown> = {};
+
   for (const arg of args.slice(1)) {
+    if (arg === "--source") { continue; }
+    if (args.slice(1).indexOf(arg) > 0 && args.slice(1)[args.slice(1).indexOf(arg) - 1] === "--source") {
+      source = arg;
+      continue;
+    }
+    if (arg === "--stdout") { continue; }
+    const stdoutIdx = args.indexOf("--stdout");
+    if (stdoutIdx >= 0 && arg === args[stdoutIdx + 1] && args.indexOf(arg) === stdoutIdx + 1) {
+      if (existsSync(arg)) { stdout = readFileSync(arg, "utf-8"); }
+      else { stdout = arg; }
+      continue;
+    }
     const eq = arg.indexOf("=");
     if (eq > 0) {
       const key = arg.slice(0, eq);
@@ -394,8 +421,69 @@ function handleEmit(args: string[]): void {
       payload[key] = value;
     }
   }
-  appendEvent(type, payload);
-  console.log(`  ✓ emitted ${type}`);
+
+  appendEvent(type, payload, undefined, source);
+  appendTrajectory(type, payload, source, stdout);
+  console.log(`  ✓ emitted ${type}${source ? ` from ${source}` : ""}`);
+}
+
+// ── TRAJECTORY ──
+
+function handleTraj(args: string[]): void {
+  const sub = args[0] ?? "tail";
+  const { readTrajectory, forkTrajectory, mergeTrajectory, readBlob, trajectoryFile } = require("./events");
+
+  if (sub === "tail" || sub === "show") {
+    const limit = sub === "tail" ? 20 : undefined;
+    const steps = readTrajectory(undefined, limit);
+    if (steps.length === 0) {
+      console.log("\n  (trajectory is empty)\n");
+      return;
+    }
+    console.log("\n  ═══ SERF TRAJECTORY ═══════════════════════");
+    for (const s of steps) {
+      const icon = s.type === "fork" ? "⑂" : s.type === "merge" ? "⤵" : "▸";
+      const src = s.source ? `[${s.source}]` : "";
+      const trunc = s.stdout_truncated ? " (truncated)" : "";
+      console.log(`  ${icon} ${s.ts.slice(11, 19)} ${src} ${s.type} ${trunc}`);
+    }
+    console.log("");
+    return;
+  }
+
+  if (sub === "full") {
+    const stepId = args[1];
+    if (!stepId) { console.log("Usage: serf traj full <step_id>"); process.exit(1); }
+    const steps = readTrajectory();
+    const step = steps.find((s: any) => s.step_id === stepId);
+    if (!step) { console.log(`Step ${stepId} not found.`); process.exit(1); }
+    console.log(JSON.stringify(step, null, 2));
+    if (step.stdout_ref) {
+      console.log("\n  ── stdout (full) ──");
+      console.log(readBlob(step.stdout_ref));
+    }
+    return;
+  }
+
+  if (sub === "fork") {
+    const type = args[1] ?? "subtask";
+    const source = args[2] ?? "master";
+    const { childId } = forkTrajectory(type, {}, source);
+    console.log(`  ✓ forked trajectory: ${childId}`);
+    return;
+  }
+
+  if (sub === "merge") {
+    const childId = args[1];
+    if (!childId) { console.log("Usage: serf traj merge <childId> [type] [source]"); process.exit(1); }
+    const type = args[2] ?? "merge";
+    const source = args[3] ?? "serf";
+    mergeTrajectory(childId, type, {}, source);
+    console.log(`  ✓ merged ${childId} into main trajectory`);
+    return;
+  }
+
+  console.log("Usage: serf traj [tail|show|full <id>|fork <type> <source>|merge <childId> <type> <source>]");
 }
 
 // ── DEFAULT ──
@@ -805,7 +893,8 @@ USAGE:
   serf providers [set <name>]        List or set LLM provider
   serf config [show|set <k> <v>]     Show or set config
   serf health [--gan] [--strict]     Run build + test + typecheck
-  serf emit <type> [key=value ...]   Emit an event to the harness
+  serf emit <type> [key=value ...] [--source <name>]   Emit an event to the harness
+  serf traj [tail|show|full <id>|fork|merge]           Trajectory operations
 
 PROVIDERS:
   serf supports any LLM backend you can reach:

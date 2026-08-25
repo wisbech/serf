@@ -465,34 +465,57 @@ export async function launchInteractiveMasterConversation(
     await herdr.sendCommand(criticPaneId, `Read ${criticPromptFile} and follow those instructions. The harness will send you proposals when they are ready.`);
 
     console.log(`  → Master launched in left pane, critic in right pane.`);
-    console.log(`  → Event-driven loop: agents emit events via 'serf emit' → harness mediates.`);
+    console.log(`  → Trajectory-driven dispatcher: agents emit via 'serf emit' → harness routes by subscriptions.`);
     console.log(`  → Talk to either pane. Exit both agents when done.\n`);
 
     const { listCards } = await import("./board");
-    const { appendEvent, subscribeFromFile } = await import("./events");
+    const { subscribeToTrajectory, loadSubscriptions } = await import("./events");
     let cardsAtStart = listCards("backlog").length;
 
     const proposalFile = join(serfTmp(), "master-proposal.md");
     const critiqueFile = join(serfTmp(), "critique.md");
 
-    const unsubProposal = subscribeFromFile("proposal.written", (e) => {
-      console.log(`  → proposal.written event — kicking critic to review...`);
-      herdr.sendCommand(
-        criticPaneId,
-        `Read ${proposalFile} and write your evaluation to ${critiqueFile}. Be adversarial. When done, run: serf emit critique.written file=.serf/tmp/critique.md`,
-      ).catch(() => {});
-    });
+    const paneForRole: Record<string, string> = {
+      master: opts.rootPaneId!,
+      critic: criticPaneId,
+    };
 
-    const unsubCritique = subscribeFromFile("critique.written", (e) => {
-      console.log(`  → critique.written event — notifying master...`);
-      herdr.sendCommand(
-        opts.rootPaneId!,
-        `Read ${critiqueFile}. The critic has reviewed your proposal. Revise if needed (then run serf emit proposal.written again), or write a card to .serf/board/backlog/ if you agree (then run serf emit card.written).`,
-      ).catch(() => {});
-    });
+    const routeToPane = (role: string, command: string) => {
+      const paneId = paneForRole[role];
+      if (paneId) {
+        console.log(`  → routing to ${role} (${paneId}): ${command.slice(0, 80)}...`);
+        herdr.sendCommand(paneId, command).catch(() => {});
+      }
+    };
 
-    const unsubCard = subscribeFromFile("card.written", (e) => {
-      console.log(`  → card.written event — checking board for new cards...`);
+    const allSubs: { role: string; types: string[]; trigger_self: boolean }[] = [];
+    for (const role of ["master", "critic"]) {
+      const subs = loadSubscriptions(role);
+      for (const sub of subs) {
+        allSubs.push({ role, types: sub.types, trigger_self: sub.trigger_self });
+      }
+    }
+
+    console.log(`  → Loaded ${allSubs.length} subscription(s): ${allSubs.map(s => `${s.role}←[${s.types.join(",")}]`).join("  ")}`);
+
+    const unsubTrajectory = subscribeToTrajectory("*", (step) => {
+      for (const sub of allSubs) {
+        if (!sub.types.includes(step.type)) continue;
+        if (step.source === sub.role && !sub.trigger_self) continue;
+
+        if (step.type === "proposal" && sub.role === "critic") {
+          routeToPane("critic", `Read ${proposalFile} and write your evaluation to ${critiqueFile}. Be adversarial. When done, run: serf emit critique.written file=.serf/tmp/critique.md --source critic`);
+        } else if (step.type === "critique" && sub.role === "master") {
+          routeToPane("master", `Read ${critiqueFile}. The critic has reviewed your proposal. Revise if needed (then run serf emit proposal.written --source master again), or write a card to .serf/board/backlog/ if you agree (then run serf emit card.written --source master).`);
+        } else if (step.type === "work" && sub.role === "critic") {
+          const output = step.payload?.outputFile ? `Read ${step.payload.outputFile} and evaluate the actor's work.` : `Evaluate the work output.`;
+          routeToPane("critic", `${output} Write your verdict and run: serf emit verdict card=${step.payload?.cardId ?? ""} --source critic`);
+        } else if (step.type === "verdict" && sub.role === "master") {
+          routeToPane("master", `The critic has verdicted: ${JSON.stringify(step.payload)}. Update the board accordingly.`);
+        } else if (step.type === "serf.completed" && sub.role === "master") {
+          routeToPane("master", `Serf completed task: ${JSON.stringify(step.payload)}. Check the board and proceed.`);
+        }
+      }
     });
 
     await new Promise<void>((resolve) => {
@@ -554,9 +577,7 @@ export async function launchInteractiveMasterConversation(
       }, 60_000);
     });
 
-    unsubProposal();
-    unsubCritique();
-    unsubCard();
+    unsubTrajectory();
 
     const finalCards = listCards("backlog");
     return { ok: true, cardsWritten: finalCards.length, output: `Conversation ended. ${finalCards.length} cards on board.` };

@@ -15,6 +15,7 @@ export interface SerfIdentity {
   model?: string;
   editor?: string;
   prefs?: Record<string, string>;
+  subscriptions?: { types: string[]; trigger_self: boolean }[];
 }
 
 function ensureDirs(): void {

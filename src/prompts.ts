@@ -9,7 +9,7 @@ export function buildMasterPrompt(stateSummary: string): string {
 2. Read .serf/plan.md and skim .serf/board/.
 3. Read .serf/STATE.md — this is the accumulated memory from past sessions. Don't repeat mistakes listed there.
 4. Write an honest overview to .serf/tmp/master-proposal.md: what the project is, what works, what's broken, what's interesting.
-5. **Run \`serf emit proposal.written file=.serf/tmp/master-proposal.md\`** — this notifies the critic to review your proposal.
+5. **Run \`serf emit proposal.written file=.serf/tmp/master-proposal.md --source master\`** — this notifies the critic to review your proposal.
 6. Propose 2-3 things worth working on, with your opinion on each. Be specific — reference real files.
 7. The critic (in the pane next to you) will read your proposal and push back. The harness will notify you when the critique is ready — read .serf/tmp/critique.md when it arrives.
 8. If you and the critic agree on a task, write a card to .serf/board/backlog/ (format below).
@@ -29,8 +29,8 @@ You have shell access. These serf commands are available to you at any time:
 - \`serf health\` — run build + test + typecheck
 
 **Event protocol:**
-- After writing .serf/tmp/master-proposal.md → run \`serf emit proposal.written file=.serf/tmp/master-proposal.md\`
-- After writing a card to .serf/board/backlog/ → run \`serf emit card.written\`
+- After writing .serf/tmp/master-proposal.md → run \`serf emit proposal.written file=.serf/tmp/master-proposal.md --source master\`
+- After writing a card to .serf/board/backlog/ → run \`serf emit card.written --source master\`
 - The harness will notify you when the critic writes a critique — you don't need to poll.
 
 If the critic pane is dead or unresponsive, run \`serf respawn critic\` to bring it back.
@@ -90,7 +90,7 @@ export function buildCriticConversationPrompt(): string {
    - Is the scope right — too big, too small, too vague?
    - Is this the highest-value work, or is there something more urgent?
 4. Write your evaluation to .serf/tmp/critique.md. Be specific. Push back on weak proposals.
-5. **Run \`serf emit critique.written file=.serf/tmp/critique.md\`** — this notifies the master that your critique is ready.
+5. **Run \`serf emit critique.written file=.serf/tmp/critique.md --source critic\`** — this notifies the master that your critique is ready.
 6. If a proposal is good, say so. If it's bad, say why. If the scope is wrong, suggest a better cut.
 7. The master will read your critique and revise or write a card. The harness will notify you if a new proposal arrives.
 
@@ -111,7 +111,7 @@ You have shell access. These serf commands are available:
 - \`serf health\` — run build + test + typecheck
 
 **Event protocol:**
-- After writing .serf/tmp/critique.md → run \`serf emit critique.written file=.serf/tmp/critique.md\`
+- After writing .serf/tmp/critique.md → run \`serf emit critique.written file=.serf/tmp/critique.md --source critic\`
 - The harness will notify you when the master writes a new proposal — you don't need to poll.
 
 If the master pane is dead, run \`serf respawn master\` to bring it back.`;
@@ -147,7 +147,7 @@ export function buildAgentPrompt(card: Card, serf: SerfIdentity, feedback: strin
 1. Edit the actual source files to implement the change.
 2. Run the verification command (test, build, lint) and make sure it passes.
 3. Write what you did to .serf/board/in-progress/${card.id}-output.md — include: which files changed, what the test output was.
-4. **Run \`serf emit serf.completed card=${card.id}\`** — this notifies the harness you're done.
+4. **Run \`serf emit serf.completed card=${card.id} --source actor\`** — this notifies the harness you're done.
 5. End the output file with the line SERF_TASK_DONE.
 
 ## Rules
