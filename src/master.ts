@@ -18,6 +18,18 @@ import { existsSync, readFileSync, writeFileSync, symlinkSync, readdirSync, unli
 import { execSync } from "node:child_process";
 
 const MAX_RETRIES = 3;
+const IDLE_POLL_MS = 2000;
+const EMPTY_BACKOFF_MS = 5000;
+
+let stopping = false;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+export function requestStop(): void {
+  stopping = true;
+}
 
 interface SpawnedSerf {
   paneId: string;
@@ -155,7 +167,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
   console.log(`  ${useHerdr ? "herdr mode" : "direct mode"} | agent: ${config?.agent ?? "claude"} | model: ${options.model ?? config?.model ?? "default"}`);
   console.log("  Loop running. Ctrl+C to stop.\n");
 
-  while (true) {
+  while (!stopping) {
     const frontier = computeFrontier();
     const inProgress = listCards("in-progress");
 
@@ -188,6 +200,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
       }
 
       if (options.once) break;
+      await sleep(EMPTY_BACKOFF_MS);
       continue;
     }
 
@@ -197,7 +210,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
     }
 
     for (const card of frontier) {
-      if (budget.isOverBudget()) break;
+      if (budget.isOverBudget() || stopping) break;
       await processCard(card, budget, transport, visibility, options.model, herdrWorkspaceId, herdrRootPaneId, serfTabId);
     }
 
@@ -205,6 +218,8 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
       updateLastSession(`${listCards("done").length} done, ${listCards("review").length} in review.`);
       break;
     }
+
+    await sleep(IDLE_POLL_MS);
   }
 }
 

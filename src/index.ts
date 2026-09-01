@@ -9,13 +9,25 @@ import { detectCapabilities, defaultAgentFromCapabilities, printCapabilities } f
 import { detectProviders, preferredProvider, defaultModelForProvider, providerInstructions } from "./providers";
 import { listAgents } from "./agent-command";
 import { addTask, validateCard, listCards, moveCard } from "./board";
-import { startMaster } from "./master";
+import { startMaster, requestStop } from "./master";
+import { acquireLock, releaseLock, readLock } from "./lock";
 
 const ARGS = process.argv.slice(2);
 
 async function main() {
   const cmd = ARGS[0];
   const args = ARGS.slice(1);
+
+  process.on("SIGINT", () => {
+    requestStop();
+    releaseLock();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    requestStop();
+    releaseLock();
+    process.exit(0);
+  });
 
   if (cmd === ".") {
     if (!existsSync(getSerfDir())) {
@@ -265,6 +277,7 @@ async function handleStart(args: string[]): Promise<void> {
   const model = modelFlag >= 0 ? args[modelFlag + 1] : undefined;
   const agentFlag = args.indexOf("--agent");
   const onceFlag = args.includes("--once");
+  const forceFlag = args.includes("--force");
 
   if (agentFlag >= 0) {
     const config = loadConfig();
@@ -272,7 +285,10 @@ async function handleStart(args: string[]): Promise<void> {
     saveConfig(config);
   }
 
+  if (!acquireRunLock(forceFlag)) return;
+
   await startMaster({ budgetLimit, model, once: onceFlag });
+  releaseLock();
 }
 
 // ── PROCESS (headless — no master interactive launch) ──
@@ -283,8 +299,31 @@ async function handleProcess(args: string[]): Promise<void> {
   const modelFlag = args.indexOf("--model");
   const model = modelFlag >= 0 ? args[modelFlag + 1] : undefined;
   const onceFlag = args.includes("--once");
+  const forceFlag = args.includes("--force");
+
+  if (!acquireRunLock(forceFlag)) return;
 
   await startMaster({ budgetLimit, model, once: onceFlag, skipMaster: true });
+  releaseLock();
+}
+
+function acquireRunLock(force: boolean): boolean {
+  const existing = readLock();
+  if (existing && existing.held && existing.pid !== process.pid) {
+    if (force) {
+      console.log(`  ⚠ Forcing start. Stale serf (pid ${existing.pid}) will be ignored.`);
+    } else {
+      console.log(`\n  ⚠ Another serf is already running (pid ${existing.pid}).`);
+      console.log(`    Use 'serf start --force' to override, or stop the other process first.\n`);
+      return false;
+    }
+  }
+  const acquired = acquireLock();
+  if (!acquired.ok) {
+    console.log(`\n  ⚠ Could not acquire lock. Another serf is running (pid ${acquired.pid}).\n`);
+    return false;
+  }
+  return true;
 }
 
 // ── HEALTH ──
@@ -339,6 +378,36 @@ function runBuiltInHealthChecks(): BuiltInCheckResult[] {
   return results;
 }
 
+function checkStaleProcesses(): void {
+  const { execSync } = require("node:child_process");
+  const lock = readLock();
+
+  if (lock && lock.held) {
+    console.log(`  ═══ SERF HEALTH — RUNNING PROCESS ═══════════`);
+    console.log(`  ✓ serf is running (pid ${lock.pid})`);
+    console.log("");
+    return;
+  }
+
+  if (lock && !lock.held) {
+    console.log(`  ═══ SERF HEALTH — STALE LOCK ═══════════`);
+    console.log(`  ⚠ Stale lockfile found (pid ${lock.pid} is not alive).`);
+    console.log(`    Run 'serf start' to clear it automatically.\n`);
+  }
+
+  try {
+    const out = execSync(`ps -axo pid=,command= | grep -E "bun .*serf( |$)" | grep -v grep`, { encoding: "utf-8" });
+    const lines = out.split("\n").map(l => l.trim()).filter(Boolean);
+    const others = lines.filter(l => !l.startsWith(String(process.pid)));
+    if (others.length > 0) {
+      console.log(`  ═══ SERF HEALTH — STALE PROCESSES ═══════════`);
+      console.log(`  ⚠ ${others.length} orphaned serf process(es) detected:`);
+      for (const l of others) console.log(`    ${l}`);
+      console.log(`    Kill with: kill <pid>\n`);
+    }
+  } catch {}
+}
+
 async function handleHealth(args: string[]): Promise<void> {
   const updatePlan = args.includes("--update-plan");
   const jsonOnly = args.includes("--json");
@@ -354,6 +423,8 @@ async function handleHealth(args: string[]): Promise<void> {
     console.log(`  ${icon} ${r.name}: ${r.details}`);
   }
   console.log(`  ${builtInPassed ? "All" : `${builtInResults.filter(r => r.passed).length}/${builtInResults.length}`} built-in checks passed\n`);
+
+  checkStaleProcesses();
 
   let scriptStatus = 0;
   const scriptPath = join(process.cwd(), "scripts", "health-check.ts");
