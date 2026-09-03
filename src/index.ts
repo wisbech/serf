@@ -11,6 +11,9 @@ import { listAgents } from "./agent-command";
 import { addTask, validateCard, listCards, moveCard } from "./board";
 import { startMaster, requestStop } from "./master";
 import { acquireLock, releaseLock, readLock } from "./lock";
+import { renderDashboard, watchDashboard } from "./watch";
+import { createRoutine, listRoutines, readRoutine, type Routine } from "./routines";
+import { createSerf, listSerfs, readSerf, type SerfIdentity } from "./serf";
 
 const ARGS = process.argv.slice(2);
 
@@ -51,6 +54,9 @@ async function main() {
     case "health":   await handleHealth(args); return;
     case "emit":     handleEmit(args); return;
     case "traj":     handleTraj(args); return;
+    case "watch":    handleWatch(args); return;
+    case "routine":  handleRoutine(args); return;
+    case "serf":     handleSerf(args); return;
     case "help":
     case "--help":
     case "-h":       printHelp(); return;
@@ -893,7 +899,7 @@ function handleConfig(args: string[]): void {
     const value = args[2];
     if (!key || value === undefined) {
       console.log("Usage: serf config set <key> <value>");
-      console.log("Keys: agent, spawnAgent, actorAgent, criticAgent, masterAgent, terminal, model, actorModel, criticModel, masterModel, backend, masterBackend, criticBackend, transport, provider, endpoint, apiKey, maxMemoryMB, memoryWarnMB");
+      console.log("Keys: agent, spawnAgent, actorAgent, criticAgent, masterAgent, terminal, model, actorModel, criticModel, masterModel, backend, masterBackend, criticBackend, transport, provider, endpoint, apiKey, maxMemoryMB, memoryWarnMB, selfCorrectTurns");
       process.exit(1);
     }
     const config = loadConfig();
@@ -946,6 +952,164 @@ function handleAgents(args: string[]): void {
   console.log("Usage: serf agents [list|use <name>]");
 }
 
+// ── WATCH ──
+
+function handleWatch(args: string[]): void {
+  const once = args.includes("--once");
+  const intervalFlag = args.indexOf("--interval");
+  const intervalMs = intervalFlag >= 0 ? parseInt(args[intervalFlag + 1], 10) * 1000 : 2000;
+
+  if (once) {
+    console.log(renderDashboard());
+    return;
+  }
+
+  const stop = watchDashboard(intervalMs);
+  process.on("SIGINT", () => {
+    stop();
+    process.exit(0);
+  });
+}
+
+// ── ROUTINE ──
+
+function handleRoutine(args: string[]): void {
+  const sub = args[0] ?? "list";
+
+  if (sub === "list") {
+    const routines = listRoutines();
+    if (routines.length === 0) {
+      console.log("\n  No routines defined.\n");
+      console.log("  Add one with: serf routine add <name> --trigger \"<keywords>\" --desc \"<description>\" --steps \"step1; step2; step3\" --verify \"<verification command>\" [--parallel]\n");
+      return;
+    }
+    console.log("\n  ═══ SERF ROUTINES ═══════════════════════");
+    for (const r of routines) {
+      const par = r.parallel ? "∥ parallel" : "→ sequential";
+      console.log(`  ${r.name} (${par})`);
+      console.log(`    trigger: ${r.trigger}`);
+      console.log(`    desc: ${r.description}`);
+      console.log(`    steps: ${r.steps.length}`);
+      console.log(`    verify: ${r.verification}`);
+      console.log("");
+    }
+    return;
+  }
+
+  if (sub === "add") {
+    const name = args[1];
+    if (!name) { console.log("Usage: serf routine add <name> --trigger \"...\" --desc \"...\" --steps \"...\" --verify \"...\" [--parallel]"); process.exit(1); }
+
+    const get = (flag: string): string | undefined => {
+      const i = args.indexOf(flag);
+      return i >= 0 ? args[i + 1] : undefined;
+    };
+    const trigger = get("--trigger") ?? name;
+    const description = get("--desc") ?? "";
+    const stepsStr = get("--steps") ?? "";
+    const verification = get("--verify") ?? "bun test";
+    const parallel = args.includes("--parallel");
+    const intervalStr = get("--interval");
+    const watchDir = get("--watch");
+
+    const steps = stepsStr.split(";").map((s) => s.trim()).filter(Boolean);
+    if (steps.length === 0) { console.log("  ⚠ --steps is required (semicolon-separated)."); process.exit(1); }
+
+    const now = new Date().toISOString();
+    createRoutine({
+      name, description, trigger, steps, verification, parallel,
+      intervalSecs: intervalStr ? parseInt(intervalStr, 10) : undefined,
+      watchDir,
+      createdAt: now, updatedAt: now,
+    });
+    const triggers = [parallel ? "parallel" : "sequential", intervalStr ? `every ${intervalStr}s` : null, watchDir ? `watch ${watchDir}` : null].filter(Boolean).join(", ");
+    console.log(`\n  ✓ Routine "${name}" created (${steps.length} steps, ${triggers}).\n`);
+    return;
+  }
+
+  if (sub === "show") {
+    const name = args[1];
+    const r = name ? readRoutine(name) : null;
+    if (!r) { console.log(`Routine "${name}" not found.`); process.exit(1); }
+    console.log(`\n  ${r.name} (${r.parallel ? "parallel" : "sequential"})`);
+    console.log(`  trigger: ${r.trigger}`);
+    console.log(`  desc: ${r.description}`);
+    console.log(`  steps:`);
+    r.steps.forEach((s, i) => console.log(`    ${i + 1}. ${s}`));
+    console.log(`  verify: ${r.verification}`);
+    if (r.intervalSecs) console.log(`  interval: every ${r.intervalSecs}s`);
+    if (r.watchDir) console.log(`  watch: ${r.watchDir}`);
+    console.log("");
+    return;
+  }
+
+  console.log("Usage: serf routine [list|add <name>|show <name>]");
+}
+
+// ── SERF (sparring partners) ──
+
+function handleSerf(args: string[]): void {
+  const sub = args[0] ?? "list";
+
+  if (sub === "list") {
+    const serfs = listSerfs();
+    console.log("\n  ═══ SERFS ═══════════════════════");
+    for (const s of serfs) {
+      const role = s.name === "master" ? "master" : s.name === "critic" ? "critic (default partner)" : s.advisory ? "advisory partner" : "blocking partner";
+      console.log(`  ${s.name} — ${role}`);
+      if (s.mission) console.log(`    mission: ${s.mission.slice(0, 60)}`);
+    }
+    console.log("");
+    return;
+  }
+
+  if (sub === "add") {
+    const name = args[1];
+    if (!name) { console.log("Usage: serf serf add <name> --mission \"...\" --persona \"...\" [--subscribe proposal] [--advisory]"); process.exit(1); }
+    const get = (flag: string): string | undefined => {
+      const i = args.indexOf(flag);
+      return i >= 0 ? args[i + 1] : undefined;
+    };
+    const mission = get("--mission") ?? `evaluate the master's proposals through the ${name} lens`;
+    const persona = get("--persona") ?? "adversarial but constructive";
+    const advisory = args.includes("--advisory");
+    const subscribe = get("--subscribe") ?? "proposal";
+
+    const identity: SerfIdentity = {
+      name,
+      mission,
+      persona,
+      lever: ["your own expertise"],
+      measurement: ["catch real problems the critic misses"],
+      fate: "If I keep passing bad work, I'm not adversarial enough.",
+      advisory,
+    };
+    createSerf(identity);
+
+    const subsPath = join(getSerfDir(), "serfs", `${name}.subs.json`);
+    writeFileSync(subsPath, JSON.stringify([{ types: subscribe.split(",").map((s) => s.trim()), trigger_self: false, watchdog_secs: 300 }], null, 2));
+
+    console.log(`\n  ✓ Serf "${name}" created (${advisory ? "advisory" : "blocking"} partner, subscribes to: ${subscribe}).\n`);
+    console.log(`    It will now spar with the master on every proposal.\n`);
+    return;
+  }
+
+  if (sub === "show") {
+    const name = args[1];
+    const s = name ? readSerf(name) : null;
+    if (!s) { console.log(`Serf "${name}" not found.`); process.exit(1); }
+    console.log(`\n  ${s.name} (${s.advisory ? "advisory" : "blocking"})`);
+    console.log(`  mission: ${s.mission}`);
+    console.log(`  persona: ${s.persona}`);
+    console.log(`  lever:`);
+    (s.lever ?? []).forEach((l) => console.log(`    - ${l}`));
+    console.log("");
+    return;
+  }
+
+  console.log("Usage: serf serf [list|add <name>|show <name>]");
+}
+
 // ── HELP ──
 
 function printHelp(): void {
@@ -966,6 +1130,9 @@ USAGE:
   serf health [--gan] [--strict]     Run build + test + typecheck
   serf emit <type> [key=value ...] [--source <name>]   Emit an event to the harness
   serf traj [tail|show|full <id>|fork|merge]           Trajectory operations
+  serf watch [--once] [--interval N]                   Live dashboard of board/events/trajectory
+  serf routine [list|add <name>|show <name>]           Manage recurrent-action routines
+  serf serf [list|add <name>|show <name>]              Manage sparring partners (serfs)
 
 PROVIDERS:
   serf supports any LLM backend you can reach:

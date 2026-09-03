@@ -15,6 +15,7 @@ export interface SerfIdentity {
   model?: string;
   editor?: string;
   prefs?: Record<string, string>;
+  advisory?: boolean;
   subscriptions?: { types: string[]; trigger_self: boolean }[];
 }
 
@@ -109,6 +110,7 @@ ${identity.fate}
 `;
   if (identity.model) md += `\n## Model\n${identity.model}\n`;
   if (identity.editor) md += `\n## Editor\n${identity.editor}\n`;
+  if (identity.advisory) md += `\n## Advisory\nyes\n`;
   if (identity.prefs && Object.keys(identity.prefs).length > 0) {
     md += `\n## Prefs\n${Object.entries(identity.prefs).map(([k, v]) => `- ${k}: ${v}`).join("\n")}\n`;
   }
@@ -123,6 +125,7 @@ function markdownToIdentity(raw: string, name: string): SerfIdentity {
   const fateMatch = raw.match(/## Fate\n([\s\S]*?)(?=\n## |$)/m);
   const modelMatch = raw.match(/## Model\n(.+)/m);
   const editorMatch = raw.match(/## Editor\n(.+)/m);
+  const advisoryMatch = raw.match(/## Advisory\n(.+)/m);
   const prefsMatch = raw.match(/## Prefs\n([\s\S]*)/);
 
   let prefs: Record<string, string> | undefined;
@@ -144,6 +147,7 @@ function markdownToIdentity(raw: string, name: string): SerfIdentity {
     fate: fateMatch?.[1]?.trim() ?? "",
     model: modelMatch?.[1]?.trim() || undefined,
     editor: editorMatch?.[1]?.trim() || undefined,
+    advisory: advisoryMatch?.[1]?.trim()?.toLowerCase() === "yes" || undefined,
     prefs,
   };
 }

@@ -1,5 +1,6 @@
 import type { Card } from "./board";
 import { loadConfig } from "./state";
+import { bestModelForTask } from "./track-record";
 
 export type ModelTier = "small" | "medium" | "large";
 
@@ -43,6 +44,9 @@ export function allocateModel(card: Card, attempt: number, previousFailureCount:
 
   if (previousFailureCount >= 2 || attempt >= 3) return large;
   if (previousFailureCount >= 1) return medium;
+
+  const learned = bestModelForTask(card.title);
+  if (learned) return learned;
 
   const estimate = estimateTask(card);
   if (estimate.suggestedTier === "large") return large;

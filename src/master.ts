@@ -1,5 +1,11 @@
 import { callLLM, BudgetTracker } from "./llm";
 import { critique, parseVerdict, type CriticVerdict } from "./critic";
+import { parseVerification, isVerificationGreen, formatVerificationFeedback } from "./verification";
+import { matchRoutine, buildRoutinePrompt } from "./routines";
+import { recordOutcome } from "./track-record";
+import { allocateModel } from "./allocator";
+import { startScheduler } from "./scheduler";
+import { readRoutine } from "./routines";
 import { readCard, moveCard, writeCard, listCards, addTask, computeFrontier, unblockDependents, type Card } from "./board";
 import { appendEvent } from "./events";
 import { getSerfDir, ensureDir } from "./paths";
@@ -10,7 +16,7 @@ import { buildMasterPrompt, buildCriticConversationPrompt, buildPlanAgentPrompt,
 import { getStateSummary, updateLastSession, addOpenFailure, addLesson } from "./state-file";
 import { appendFailureMode, writeTrace, createSkillFolder } from "./skills";
 import type { Transport, ActorRunResult } from "./transport";
-import { HeadlessTransport, HerdrTransport, FakeTransport, launchInteractiveMasterConversation, type ConversationResult } from "./transport";
+import { HeadlessTransport, HerdrTransport, FakeTransport, launchCouncil, type ConversationResult } from "./transport";
 import { NoopVisibility, HerdrVisibility, type VisibilityLayer, type PaneHandle } from "./visibility";
 import { isHerdrRunning, isHerdrResponding, createWorkspace, listWorkspaces, type PaneInfo } from "./herdr-client";
 import { join } from "node:path";
@@ -167,6 +173,20 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
   console.log(`  ${useHerdr ? "herdr mode" : "direct mode"} | agent: ${config?.agent ?? "claude"} | model: ${options.model ?? config?.model ?? "default"}`);
   console.log("  Loop running. Ctrl+C to stop.\n");
 
+  const stopScheduler = startScheduler();
+  const { subscribe } = await import("./events");
+  const unsubRoutine = subscribe("routine.due", (e) => {
+    const routineName = e.payload?.routine as string | undefined;
+    if (!routineName) return;
+    const routine = readRoutine(routineName);
+    if (!routine) return;
+    const title = `${routine.name}: ${routine.description || "recurrent action"}`;
+    const existing = listCards().some((c) => c.title === title && c.column !== "done");
+    if (existing) return;
+    addTask(title, routine.description, `Complete routine: ${routine.name}`, routine.steps.join("; "), [routine.verification]);
+    console.log(`  → Routine "${routine.name}" enqueued (${e.payload?.reason ?? "trigger"}).`);
+  });
+
   while (!stopping) {
     const frontier = computeFrontier();
     const inProgress = listCards("in-progress");
@@ -177,13 +197,12 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
         break;
       }
 
-      console.log("\n  Board is empty. Launching master + critic conversation...\n");
+      console.log("\n  Board is empty. Launching master + sparring partners...\n");
 
       const stateSummary = getStateSummary();
       const masterPrompt = buildMasterPrompt(stateSummary);
-      const criticPrompt = buildCriticConversationPrompt();
 
-      const result = await launchInteractiveMasterConversation(masterPrompt, criticPrompt, {
+      const result = await launchCouncil(masterPrompt, {
         cwd: process.cwd(),
         workspaceId: useHerdr ? herdrWorkspaceId : undefined,
         rootPaneId: useHerdr ? herdrRootPaneId : undefined,
@@ -221,6 +240,9 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
 
     await sleep(IDLE_POLL_MS);
   }
+
+  unsubRoutine();
+  stopScheduler();
 }
 
 async function processCard(
@@ -381,19 +403,36 @@ async function executeWithCritique(
   serfBase: string,
 ): Promise<"done" | "review"> {
   const actorIdentity = readSerfSafe("actor");
-  const basePrompt = buildAgentPrompt(card, actorIdentity, "", 1);
   const outputPath = join(serfBase, "board", "in-progress", `${card.id}-output.md`);
+
+  const routine = matchRoutine(card.title);
+  if (routine) {
+    console.log(`    → Routine matched: ${routine.name} (${routine.parallel ? "parallel" : "sequential"})`);
+    appendEvent("routine.matched", { card: card.id, routine: routine.name });
+  }
+
+  const basePrompt = routine
+    ? buildRoutinePrompt(routine, card)
+    : buildAgentPrompt(card, actorIdentity, "", 1);
+
+  const config = loadConfig();
+  const selfCorrectTurns = config?.selfCorrectTurns ?? 3;
   let previousFeedback = "";
+  let lastFailedCriteria: string[] = [];
+  let lastActorModel = config?.model ?? "unknown";
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     console.log(`    → Attempt ${attempt}: actor working...`);
 
+    const actorModel = allocateModel(card, attempt, attempt - 1);
+    lastActorModel = actorModel;
     const prompt = attempt === 1 ? basePrompt : `${basePrompt}\n\n${previousFeedback}`;
-    const runResult = await transport.run(prompt, {
+    let runResult = await transport.run(prompt, {
       cwd: process.cwd(),
       timeoutMs: 600_000,
       outputFile: outputPath,
       label: `actor: ${card.title.slice(0, 30)}`,
+      model: actorModel,
     });
     trackPhaseUsage(cbudget, "execution", runResult.tokensUsed);
 
@@ -404,6 +443,39 @@ async function executeWithCritique(
     }
 
     console.log(`    → ${runResult.output.length} chars`);
+
+    let verification = parseVerification(runResult.output);
+    let green = isVerificationGreen(verification);
+
+    if (green) {
+      console.log(`    ✓ Verification green (exit ${verification.exitCode}): ${verification.command ?? "(unknown)"}`);
+      appendEvent("verification.green", { card: card.id, attempt, command: verification.command, exitCode: verification.exitCode });
+    } else {
+      console.log(`    ⚠ Verification not green: ${verification.present ? `exit ${verification.exitCode}` : "no verification reported"}`);
+      appendEvent("verification.red", { card: card.id, attempt, present: verification.present });
+    }
+
+    for (let turn = 1; !green && turn <= selfCorrectTurns; turn++) {
+      if (isPhaseOverBudget(cbudget, "execution")) break;
+      console.log(`      ↻ Self-correct turn ${turn}/${selfCorrectTurns}...`);
+      const fixPrompt = `${prompt}\n\nYour previous attempt did not pass verification. Fix it and re-run the verification command.\n\n${formatVerificationFeedback(verification)}\n\nReport the new result with VERIFICATION_COMMAND, VERIFICATION_EXIT_CODE, VERIFICATION_OUTPUT, and FILES_CHANGED. End with SERF_TASK_DONE.`;
+      runResult = await transport.run(fixPrompt, {
+        cwd: process.cwd(),
+        timeoutMs: 600_000,
+        outputFile: outputPath,
+        label: `actor: ${card.title.slice(0, 30)} (fix ${turn})`,
+        model: actorModel,
+      });
+      trackPhaseUsage(cbudget, "execution", runResult.tokensUsed);
+      if (!runResult.ok) break;
+      verification = parseVerification(runResult.output);
+      green = isVerificationGreen(verification);
+      appendEvent("verification.selfcorrect", { card: card.id, attempt, turn, green });
+      if (green) {
+        console.log(`      ✓ Self-corrected to green (exit ${verification.exitCode})`);
+        appendEvent("verification.green", { card: card.id, attempt, command: verification.command, exitCode: verification.exitCode, selfCorrected: true });
+      }
+    }
 
     const { verdict, tokensUsed } = await critique(card.task, runResult.output, card.acceptance);
     trackPhaseUsage(cbudget, "critic", tokensUsed);
@@ -420,19 +492,36 @@ async function executeWithCritique(
       confidence: verdict.confidence,
     });
 
-    if (verdict.verdict === "pass" && verdict.confidence > 0.7) {
+    const criticPass = verdict.verdict === "pass" && verdict.confidence > 0.7;
+    const pass = green && criticPass;
+
+    if (pass) {
       finishCard(card, runResult.output, verdict.confidence, cbudget);
       syncVerificationToCard(card, [
         `Pass: attempt ${attempt}, confidence ${(verdict.confidence * 100).toFixed(0)}%`,
+        `Verification: ${verification.command ?? "(unknown)"} exit ${verification.exitCode}`,
       ]);
       writeCard(card);
       appendEvent("task.completed", { card: card.id, quality: verdict.confidence, attempt });
       console.log(`    ✓ Completed (confidence ${(verdict.confidence * 100).toFixed(0)}%)\n`);
       addLesson(`"${card.title}" completed on attempt ${attempt}.`);
+      recordOutcome({
+        cardId: card.id,
+        title: card.title,
+        model: actorModel,
+        agent: config?.agent ?? "unknown",
+        outcome: "pass",
+        attempts: attempt,
+        failedCriteria: [],
+        routine: routine?.name,
+        ts: new Date().toISOString(),
+      });
       return "done";
     }
 
-    previousFeedback = `CRITIC FEEDBACK (attempt ${attempt} was ${verdict.verdict}):\nIssues: ${verdict.issues.join("; ")}\nReasoning: ${verdict.reasoning}\n\nAddress each issue with concrete evidence and file paths.`;
+    const failedCriteria = verdict.issues.filter((i) => i.startsWith("FAILED:")).map((i) => i.replace(/^FAILED:\s*/, ""));
+    lastFailedCriteria = failedCriteria;
+    previousFeedback = `CRITIC FEEDBACK (attempt ${attempt} was ${verdict.verdict}):\nIssues: ${verdict.issues.join("; ")}\nReasoning: ${verdict.reasoning}\n\n${formatVerificationFeedback(verification)}\n\nAddress each issue with concrete evidence and file paths.`;
     appendEvent("task.retry", { card: card.id, attempt, issues: verdict.issues });
 
     if (verdict.confidence <= 0.7 && attempt >= 2) {
@@ -450,6 +539,17 @@ async function executeWithCritique(
     `Issues: ${verdict_failed_issues(card)}`,
   ]);
   writeCard(card);
+  recordOutcome({
+    cardId: card.id,
+    title: card.title,
+    model: lastActorModel,
+    agent: config?.agent ?? "unknown",
+    outcome: "fail",
+    attempts: MAX_RETRIES,
+    failedCriteria: lastFailedCriteria,
+    routine: routine?.name,
+    ts: new Date().toISOString(),
+  });
   const skillName = card.title.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 2).slice(0, 3).join("-");
   createSkillFolder(skillName, `Auto-created from failed task: ${card.title}`);
   writeTrace(skillName, `${card.id}-final`, `# Trace: ${card.title}\n\n## Task\n${card.task}\n\n## What went wrong\n${previousFeedback}\n`);
@@ -490,6 +590,7 @@ function ensureSeeded(): void {
     "serfs", "knowledge/skills", "knowledge/patterns", "knowledge/failures", "knowledge/references",
     "events", "worktrees", "tmp", "trajectories",
     "workspaces/actor/.serf", "workspaces/critic/.serf", "workspaces/critic/.serf/verdicts",
+    "routines", "knowledge/track-record",
   ]) {
     ensureDir(join(serfDir, dir));
   }

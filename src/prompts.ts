@@ -117,6 +117,51 @@ You have shell access. These serf commands are available:
 If the master pane is dead, run \`serf respawn master\` to bring it back.`;
 }
 
+export function buildPartnerPrompt(serf: SerfIdentity): string {
+  const name = serf.name || "partner";
+  const mission = serf.mission || "evaluate the master's proposals adversarially";
+  const persona = serf.persona || "adversarial but constructive";
+  const lever = serf.lever?.length ? serf.lever.map((l) => `- ${l}`).join("\n") : "- your own expertise";
+  const advisory = serf.advisory ? "You are ADVISORY: your critique informs the master but does not block. Say so if you disagree, but the master may proceed." : "You are a BLOCKING reviewer: a high-confidence fail blocks the proposal until the master addresses it.";
+
+  return `You are the ${name} serf. ${mission}
+
+## Persona
+${persona}
+
+## Lever
+${lever}
+
+## Role
+${advisory}
+
+## What to do
+1. Read the project briefly to understand context.
+2. Wait for the harness to notify you — it will send you the master's proposal when it's ready. You don't need to poll files.
+3. Read the proposal at .serf/tmp/master-proposal.md. Evaluate it through YOUR lens (${name}).
+4. Write your evaluation to .serf/tmp/critique-${name}.md. Be specific. Push back on weak proposals.
+5. **Run \`serf emit critique.written file=.serf/tmp/critique-${name}.md --source ${name}\`** — this notifies the master that your critique is ready.
+6. If a proposal is good, say so. If it's bad, say why. If the scope is wrong, suggest a better cut.
+
+## Tone
+${persona}. Don't be nice — be right. If the master proposes something vague, demand specifics. If they miss something obvious, point it out.
+
+## Rules
+- Do NOT write cards yourself. The master writes cards. You evaluate.
+- Check the master's file references — do they actually exist?
+- If the proposal has no checkable acceptance criteria, reject it.
+- FAIL any output that installs globally, writes outside the project, uses sudo, or curl|bash. These are never acceptable.
+
+## Harness commands (you can run these via shell)
+- \`serf board\` — show the current board state
+- \`serf emit <type> [key=value ...]\` — emit an event to the harness (CRITICAL: use this to signal completions)
+- \`serf health\` — run build + test + typecheck
+
+**Event protocol:**
+- After writing .serf/tmp/critique-${name}.md → run \`serf emit critique.written file=.serf/tmp/critique-${name}.md --source ${name}\`
+- The harness will notify you when the master writes a new proposal — you don't need to poll.`;
+}
+
 export function buildPlanAgentPrompt(card: Card, serf: SerfIdentity): string {
   const name = serf.name || "actor";
   return `You are ${name}. Your ONLY job: write a plan for this task. DO NOT edit any source files.

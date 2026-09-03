@@ -34,6 +34,8 @@ export interface Config {
   memoryWarnMB?: number;
   masterBackend?: string;
   criticBackend?: string;
+  selfCorrectTurns?: number;
+  maxRounds?: number;
 }
 
 function findConfigPath(): string | null {
