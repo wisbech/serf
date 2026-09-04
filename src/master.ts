@@ -128,16 +128,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
           console.log(`  ✓ Master is already running.`);
         }
       } else {
-        const { renameWorkspace } = await import("./herdr-client");
-        const focused = existing.find((w: any) => w.focused);
-        let ws: any;
-        if (focused && focused.pane_count <= 1) {
-          await renameWorkspace(focused.workspace_id, "serf").catch(() => {});
-          ws = focused;
-          console.log(`  → Adopted focused workspace and renamed it to "serf" (${focused.workspace_id})`);
-        } else {
-          ws = await createWorkspace("serf", process.cwd());
-        }
+        const ws = await createWorkspace("serf", process.cwd());
         herdrWorkspaceId = ws.workspace_id;
         herdrRootPaneId = ws.workspace_id + ":p1";
         await import("./herdr-client").then(h => h.labelPane(herdrRootPaneId!, "master"));
