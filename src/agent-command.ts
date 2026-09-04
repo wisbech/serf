@@ -107,6 +107,12 @@ export function buildInteractiveInvocation(agent: string, model?: string, prompt
   return builder(model, prompt);
 }
 
+export function qualifyModel(model: string, provider?: string): string {
+  if (!provider || provider === "unknown") return model;
+  if (model.includes("/")) return model;
+  return `${provider}/${model}`;
+}
+
 export function listAgents(): string[] {
   return Object.keys(REGISTRY);
 }

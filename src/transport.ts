@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync, unlinkSync, createWriteStream, watch, statSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { buildInvocation, buildInteractiveInvocation } from "./agent-command";
+import { buildInvocation, buildInteractiveInvocation, qualifyModel } from "./agent-command";
 import type { SandboxProfile } from "./sandbox";
 import { loadConfig } from "./state";
 import { getSerfDir, ensureDir } from "./paths";
@@ -379,8 +379,8 @@ export class HerdrTransport implements Transport {
     writeFileSync(promptFile, prompt);
 
     let argStr = invocation.args.map((a) => JSON.stringify(a)).join(" ");
-    if (agentName === "opencode" && model && config?.provider) {
-      const providerModel = model.includes("/") ? model : `${config.provider}/${model}`;
+    if (agentName === "opencode" && model) {
+      const providerModel = qualifyModel(model, config?.provider);
       const fixedInv = buildInteractiveInvocation(agentName, providerModel);
       argStr = fixedInv.args.map((a) => JSON.stringify(a)).join(" ");
     }
@@ -444,13 +444,13 @@ export async function launchInteractiveMasterConversation(
   let masterArgStr = masterInv.args.map((a) => JSON.stringify(a)).join(" ");
   let criticArgStr = criticInv.args.map((a) => JSON.stringify(a)).join(" ");
 
-  if (masterAgent === "opencode" && masterModel && config?.provider) {
-    const providerModel = masterModel.includes("/") ? masterModel : `${config.provider}/${masterModel}`;
+  if (masterAgent === "opencode" && masterModel) {
+    const providerModel = qualifyModel(masterModel, config?.provider);
     const fixedInv = buildInteractiveInvocation(masterAgent, providerModel);
     masterArgStr = fixedInv.args.map((a) => JSON.stringify(a)).join(" ");
   }
-  if (criticAgent === "opencode" && criticModel && config?.provider) {
-    const providerModel = criticModel.includes("/") ? criticModel : `${config.provider}/${criticModel}`;
+  if (criticAgent === "opencode" && criticModel) {
+    const providerModel = qualifyModel(criticModel, config?.provider);
     const fixedInv = buildInteractiveInvocation(criticAgent, providerModel);
     criticArgStr = fixedInv.args.map((a) => JSON.stringify(a)).join(" ");
   }
@@ -646,8 +646,8 @@ export async function launchCouncil(
   writeFileSync(masterPromptFile, masterPrompt);
 
   let masterArgStr = masterInv.args.map((a) => JSON.stringify(a)).join(" ");
-  if (masterAgent === "opencode" && masterModel && config?.provider) {
-    const providerModel = masterModel.includes("/") ? masterModel : `${config.provider}/${masterModel}`;
+  if (masterAgent === "opencode" && masterModel) {
+    const providerModel = qualifyModel(masterModel, config?.provider);
     const fixedInv = buildInteractiveInvocation(masterAgent, providerModel);
     masterArgStr = fixedInv.args.map((a) => JSON.stringify(a)).join(" ");
   }
@@ -666,8 +666,8 @@ export async function launchCouncil(
     const partnerModel = p.model ?? config?.criticModel ?? config?.model;
     const inv = buildInteractiveInvocation(partnerAgent, partnerModel);
     let argStr = inv.args.map((a) => JSON.stringify(a)).join(" ");
-    if (partnerAgent === "opencode" && partnerModel && config?.provider) {
-      const providerModel = partnerModel.includes("/") ? partnerModel : `${config.provider}/${partnerModel}`;
+    if (partnerAgent === "opencode" && partnerModel) {
+      const providerModel = qualifyModel(partnerModel, config?.provider);
       const fixedInv = buildInteractiveInvocation(partnerAgent, providerModel);
       argStr = fixedInv.args.map((a) => JSON.stringify(a)).join(" ");
     }

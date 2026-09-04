@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { FakeTransport, HeadlessTransport, HerdrTransport, waitForOutputFile, type Transport, type RunOpts } from "../src/transport";
-import { buildInvocation, listAgents, isHeadless } from "../src/agent-command";
+import { buildInvocation, listAgents, isHeadless, qualifyModel } from "../src/agent-command";
 import { writeFileSync, mkdtempSync, rmSync, utimesSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -45,6 +45,19 @@ describe("Agent Command", () => {
     expect(isHeadless("claude")).toBe(true);
     expect(isHeadless("opencode")).toBe(true);
     expect(isHeadless("unknown")).toBe(false);
+  });
+
+  test("qualifyModel does not prefix when provider is unknown", () => {
+    expect(qualifyModel("claude-sonnet-4-20250514", "unknown")).toBe("claude-sonnet-4-20250514");
+    expect(qualifyModel("claude-sonnet-4-20250514", undefined)).toBe("claude-sonnet-4-20250514");
+  });
+
+  test("qualifyModel prefixes a real provider", () => {
+    expect(qualifyModel("qwen3:8b", "ollama")).toBe("ollama/qwen3:8b");
+  });
+
+  test("qualifyModel leaves already-qualified models alone", () => {
+    expect(qualifyModel("ollama/qwen3:8b", "ollama")).toBe("ollama/qwen3:8b");
   });
 });
 

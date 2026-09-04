@@ -766,6 +766,7 @@ async function respawnCritic(panes: any[], wsId: string, config: any): Promise<v
 async function respawnInPane(paneId: string, role: "master" | "critic", config: any, isMaster: boolean): Promise<void> {
   const { sendCommand, labelPane } = await import("./herdr-client");
   const { buildInteractiveInvocation } = await import("./agent-command");
+  const { qualifyModel } = await import("./agent-command");
   const { writeFileSync } = await import("node:fs");
 
   const agentName = isMaster
@@ -778,8 +779,8 @@ async function respawnInPane(paneId: string, role: "master" | "critic", config: 
   const inv = buildInteractiveInvocation(agentName, model);
   let argStr = inv.args.map((a: string) => JSON.stringify(a)).join(" ");
 
-  if (agentName === "opencode" && model && config?.provider) {
-    const providerModel = model.includes("/") ? model : `${config.provider}/${model}`;
+  if (agentName === "opencode" && model) {
+    const providerModel = qualifyModel(model, config?.provider);
     const { buildInteractiveInvocation: buildInv } = await import("./agent-command");
     const fixedInv = buildInv("opencode", providerModel);
     argStr = fixedInv.args.map((a: string) => JSON.stringify(a)).join(" ");

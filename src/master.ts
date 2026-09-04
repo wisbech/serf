@@ -17,6 +17,7 @@ import { getStateSummary, updateLastSession, addOpenFailure, addLesson } from ".
 import { appendFailureMode, writeTrace, createSkillFolder } from "./skills";
 import type { Transport, ActorRunResult } from "./transport";
 import { HeadlessTransport, HerdrTransport, FakeTransport, launchCouncil, type ConversationResult } from "./transport";
+import { qualifyModel } from "./agent-command";
 import { NoopVisibility, HerdrVisibility, type VisibilityLayer, type PaneHandle } from "./visibility";
 import { isHerdrRunning, isHerdrResponding, createWorkspace, listWorkspaces, type PaneInfo } from "./herdr-client";
 import { join } from "node:path";
@@ -112,8 +113,8 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
           const masterModel = config?.masterModel ?? config?.model;
           const inv = buildInv(masterAgent, masterModel);
           let argStr = inv.args.map((a: string) => JSON.stringify(a)).join(" ");
-          if (masterAgent === "opencode" && masterModel && config?.provider) {
-            const providerModel = masterModel.includes("/") ? masterModel : `${config.provider}/${masterModel}`;
+          if (masterAgent === "opencode" && masterModel) {
+            const providerModel = qualifyModel(masterModel, config?.provider);
             const fixedInv = buildInv(masterAgent, providerModel);
             argStr = fixedInv.args.map((a: string) => JSON.stringify(a)).join(" ");
           }
@@ -143,8 +144,8 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
         const masterModel = config?.masterModel ?? config?.model;
         const inv = buildInv(masterAgent, masterModel);
         let argStr = inv.args.map((a: string) => JSON.stringify(a)).join(" ");
-        if (masterAgent === "opencode" && masterModel && config?.provider) {
-          const providerModel = masterModel.includes("/") ? masterModel : `${config.provider}/${masterModel}`;
+        if (masterAgent === "opencode" && masterModel) {
+          const providerModel = qualifyModel(masterModel, config?.provider);
           const fixedInv = buildInv(masterAgent, providerModel);
           argStr = fixedInv.args.map((a: string) => JSON.stringify(a)).join(" ");
         }
