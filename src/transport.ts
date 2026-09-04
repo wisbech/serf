@@ -103,12 +103,13 @@ async function waitForOutputFile(
   return new Promise<string>((resolve) => {
     let resolved = false;
     let watcher: any = null;
+    let interval: any = null;
 
     function finish(content: string) {
       if (resolved) return;
       resolved = true;
       if (watcher) watcher.close();
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
       resolve(content);
     }
 
@@ -140,7 +141,7 @@ async function waitForOutputFile(
       });
     } catch {}
 
-    const interval = setInterval(async () => {
+    interval = setInterval(async () => {
       if (resolved) { clearInterval(interval); return; }
 
       if (checkContent()) {
