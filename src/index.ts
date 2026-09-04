@@ -14,6 +14,8 @@ import { acquireLock, releaseLock, readLock } from "./lock";
 import { renderDashboard, watchDashboard } from "./watch";
 import { createRoutine, listRoutines, readRoutine, type Routine } from "./routines";
 import { createSerf, listSerfs, readSerf, type SerfIdentity } from "./serf";
+import { choose } from "./choose";
+import { isHerdrRunning, isHerdrResponding } from "./herdr-client";
 
 const ARGS = process.argv.slice(2);
 
@@ -284,6 +286,8 @@ async function handleStart(args: string[]): Promise<void> {
   const agentFlag = args.indexOf("--agent");
   const onceFlag = args.includes("--once");
   const forceFlag = args.includes("--force");
+  const herdrFlag = args.includes("--herdr");
+  const headlessFlag = args.includes("--headless");
 
   if (agentFlag >= 0) {
     const config = loadConfig();
@@ -291,9 +295,20 @@ async function handleStart(args: string[]): Promise<void> {
     saveConfig(config);
   }
 
+  let transport: "herdr" | "headless" | undefined;
+  if (herdrFlag) transport = "herdr";
+  else if (headlessFlag) transport = "headless";
+  else if (!onceFlag && process.stdin.isTTY) {
+    const herdrAvailable = isHerdrRunning() && (await isHerdrResponding());
+    transport = await choose<"herdr" | "headless">("How should serf run?", [
+      { label: "herdr (panes)", value: "herdr", hint: herdrAvailable ? "visible master + partners in herdr" : "⚠ herdr not running — will fall back" },
+      { label: "headless", value: "headless", hint: "no panes, runs in the background" },
+    ]);
+  }
+
   if (!acquireRunLock(forceFlag)) return;
 
-  await startMaster({ budgetLimit, model, once: onceFlag });
+  await startMaster({ budgetLimit, model, once: onceFlag, transport });
   releaseLock();
 }
 
@@ -1121,6 +1136,7 @@ USAGE:
   serf init                          Create .serf/ in current project
   serf task "do something"           Add a task to the board
   serf start [--once] [--budget N]   Launch master agent — surveys project, processes tasks
+  serf start [--herdr|--headless]    Choose transport explicitly (else arrow-key prompt)
   serf process [--once] [--budget N]  Same as start (headless board loop)
   serf board                         Show the kanban board
   serf board move <id> <column>      Move a card between columns

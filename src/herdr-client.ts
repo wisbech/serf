@@ -121,6 +121,11 @@ export async function closeWorkspace(workspaceId: string): Promise<boolean> {
   return true;
 }
 
+export async function renameWorkspace(workspaceId: string, label: string): Promise<boolean> {
+  await send("workspace.rename", { workspace_id: workspaceId, label });
+  return true;
+}
+
 export async function renamePane(paneId: string, label: string, retries = 3): Promise<boolean> {
   for (let i = 0; i < retries; i++) {
     try {

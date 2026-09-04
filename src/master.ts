@@ -52,6 +52,7 @@ export interface MasterOptions {
   model?: string;
   once?: boolean;
   skipMaster?: boolean;
+  transport?: "herdr" | "headless";
 }
 
 function estimateTokens(text: string): number {
@@ -68,7 +69,10 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
   });
 
   const config = loadConfig();
-  let useHerdr = isHerdrRunning() && (config.transport ?? "herdr") === "herdr";
+  const transportOverride = options.transport;
+  let useHerdr = transportOverride
+    ? transportOverride === "herdr"
+    : isHerdrRunning() && (config.transport ?? "herdr") === "herdr";
   if (useHerdr) {
     const responding = await isHerdrResponding();
     if (!responding) {
@@ -124,7 +128,16 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
           console.log(`  ✓ Master is already running.`);
         }
       } else {
-        const ws = await createWorkspace("serf", process.cwd());
+        const { renameWorkspace } = await import("./herdr-client");
+        const focused = existing.find((w: any) => w.focused);
+        let ws: any;
+        if (focused && focused.pane_count <= 1) {
+          await renameWorkspace(focused.workspace_id, "serf").catch(() => {});
+          ws = focused;
+          console.log(`  → Adopted focused workspace and renamed it to "serf" (${focused.workspace_id})`);
+        } else {
+          ws = await createWorkspace("serf", process.cwd());
+        }
         herdrWorkspaceId = ws.workspace_id;
         herdrRootPaneId = ws.workspace_id + ":p1";
         await import("./herdr-client").then(h => h.labelPane(herdrRootPaneId!, "master"));
