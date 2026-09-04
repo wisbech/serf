@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { FakeTransport, HeadlessTransport, HerdrTransport, type Transport, type RunOpts } from "../src/transport";
+import { FakeTransport, HeadlessTransport, HerdrTransport, waitForOutputFile, type Transport, type RunOpts } from "../src/transport";
 import { buildInvocation, listAgents, isHeadless } from "../src/agent-command";
 import { writeFileSync, mkdtempSync, rmSync, utimesSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -108,6 +108,34 @@ describe("proposal mtime polling", () => {
     writeFileSync(file, "v1");
     const mtime2 = statSync(file).mtimeMs;
     expect(mtime2).toBeGreaterThan(0);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("waitForOutputFile", () => {
+  test("resolves immediately when output file already contains a completion marker (no TDZ crash)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "serf-wait-"));
+    const file = join(dir, "output.md");
+    writeFileSync(file, "some output\nSERF_DONE_EXIT_CODE=0\n");
+
+    const result = await waitForOutputFile(file, 1000);
+    expect(result).toContain("SERF_DONE_EXIT_CODE=0");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("resolves when the marker appears after construction", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "serf-wait-"));
+    const file = join(dir, "output.md");
+
+    const pending = waitForOutputFile(file, 5000);
+    setTimeout(() => {
+      writeFileSync(file, "work done\nSERF_TASK_DONE\n");
+    }, 50);
+
+    const result = await pending;
+    expect(result).toContain("SERF_TASK_DONE");
 
     rmSync(dir, { recursive: true, force: true });
   });

@@ -88,7 +88,7 @@ echo "SERF_DONE_EXIT_CODE=$?" >> "${outputFile}"
 `;
 }
 
-async function waitForOutputFile(
+export async function waitForOutputFile(
   outputFile: string,
   _timeoutMs: number,
   doneMarker = "SERF_DONE_EXIT_CODE",
