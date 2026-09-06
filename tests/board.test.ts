@@ -32,6 +32,21 @@ describe("Board", () => {
     expect(read!.title).toBe("Test task");
   });
 
+  test("addTask assigns a serf and round-trips through markdown", () => {
+    const card = addTask("Reconcile invoices", undefined, undefined, undefined, undefined, undefined, "accounting");
+    expect(card.assigned).toBe("accounting");
+
+    const read = readCard(card.id);
+    expect(read!.assigned).toBe("accounting");
+  });
+
+  test("addTask without assignment leaves assigned undefined", () => {
+    const card = addTask("Unassigned task");
+    expect(card.assigned).toBeUndefined();
+    const read = readCard(card.id);
+    expect(read!.assigned).toBeUndefined();
+  });
+
   test("moveCard moves between columns", () => {
     const card = addTask("Move test");
     expect(card.column).toBe("backlog");

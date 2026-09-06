@@ -71,7 +71,7 @@ export function hasSimilarTask(title: string): Card | null {
   return null;
 }
 
-export function addTask(title: string, task?: string, goal?: string, lever?: string, acceptance?: string[], context?: string): Card {
+export function addTask(title: string, task?: string, goal?: string, lever?: string, acceptance?: string[], context?: string, assigned?: string): Card {
   ensureBoard();
   const existing = hasSimilarTask(title);
   if (existing) {
@@ -87,6 +87,7 @@ export function addTask(title: string, task?: string, goal?: string, lever?: str
     id,
     title,
     column: "backlog",
+    assigned,
     task: task ?? title,
     goal: goal ?? `Achieve: ${title}`,
     lever: lever ?? `Implement the changes and verify them with tests or observable output`,

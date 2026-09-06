@@ -186,21 +186,25 @@ function detectProvidersSync(): any[] {
 
 async function handleTask(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.log("Usage: serf task \"do something\"");
+    console.log("Usage: serf task \"do something\" [--serf <name>]");
     process.exit(1);
   }
-  const title = args.join(" ");
+  const serfFlag = args.indexOf("--serf");
+  const assigned = serfFlag >= 0 ? args[serfFlag + 1] : undefined;
+  const titleArgs = serfFlag >= 0 ? args.slice(0, serfFlag) : args;
+  const title = titleArgs.join(" ");
   const goal = `Achieve: ${title}`;
   const lever = `Edit source files and add/update tests to implement and verify the change`;
   const acceptance = generateAcceptance(title);
 
-  const card = addTask(title, title, goal, lever, acceptance);
+  const card = addTask(title, title, goal, lever, acceptance, undefined, assigned);
   const errors = validateCard(card);
   if (errors.length > 0) {
     console.log(`\n  ⚠ Card created with warnings: ${errors.join("; ")}\n`);
   }
   console.log(`\n  ✓ Task added to backlog: ${card.id}`);
   console.log(`    "${title}"`);
+  if (assigned) console.log(`    Assigned to: ${assigned}`);
   console.log(`    Goal: ${card.goal}`);
   console.log(`    Lever: ${card.lever}`);
   console.log(`    Acceptance:`);
@@ -250,7 +254,8 @@ async function handleBoard(args: string[]): Promise<void> {
         const frontier = !blocked && col === "backlog" ? " ★" : "  ";
         const quality = card.quality ? ` [${(card.quality * 100).toFixed(0)}%]` : "";
         const feedback = card.feedback ? ` (${card.feedback})` : "";
-        console.log(`  │ ${frontier}${title}${blocked}${quality}${feedback}`.padEnd(64) + "│");
+        const assigned = card.assigned ? ` @${card.assigned}` : "";
+        console.log(`  │ ${frontier}${title}${assigned}${blocked}${quality}${feedback}`.padEnd(64) + "│");
       }
       if (cards.length === 0) {
         console.log(`  │    ${"(empty)".padEnd(50)}│`);
