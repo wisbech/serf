@@ -1,24 +1,23 @@
 import { callLLM, BudgetTracker } from "./llm";
 import { critique, parseVerdict, type CriticVerdict } from "./critic";
 import { parseVerification, isVerificationGreen, formatVerificationFeedback } from "./verification";
-import { matchRoutine, buildRoutinePrompt } from "./routines";
+import { matchRoutine, buildRoutinePrompt, readRoutine } from "./routines";
 import { recordOutcome } from "./track-record";
 import { allocateModel } from "./allocator";
 import { startScheduler } from "./scheduler";
-import { readRoutine } from "./routines";
-import { readCard, moveCard, writeCard, listCards, addTask, computeFrontier, unblockDependents, type Card } from "./board";
+import { moveCard, writeCard, listCards, addTask, computeFrontier, unblockDependents, type Card } from "./board";
 import { appendEvent } from "./events";
 import { getSerfDir, ensureDir } from "./paths";
 import { loadConfig } from "./state";
 import { createCardBudget, trackPhaseUsage, isPhaseOverBudget, formatBudget, getTotalUsage, type CardBudget } from "./budget";
 import { createPrdStub, prdExists, syncDecisionsToCard, syncVerificationToCard } from "./prd";
-import { buildMasterPrompt, buildCriticConversationPrompt, buildPlanAgentPrompt, buildAgentPrompt } from "./prompts";
+import { buildMasterPrompt, buildPlanAgentPrompt, buildAgentPrompt } from "./prompts";
 import { getStateSummary, updateLastSession, addOpenFailure, addLesson } from "./state-file";
 import { appendFailureMode, writeTrace, createSkillFolder } from "./skills";
-import type { Transport, ActorRunResult } from "./transport";
-import { HeadlessTransport, HerdrTransport, FakeTransport, launchCouncil, type ConversationResult } from "./transport";
+import type { Transport } from "./transport";
+import { HeadlessTransport, HerdrTransport, launchCouncil } from "./transport";
 import { qualifyModel } from "./agent-command";
-import { NoopVisibility, HerdrVisibility, type VisibilityLayer, type PaneHandle } from "./visibility";
+import { NoopVisibility, HerdrVisibility, type VisibilityLayer } from "./visibility";
 import { isHerdrRunning, isHerdrResponding, createWorkspace, listWorkspaces, type PaneInfo } from "./herdr-client";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, symlinkSync, readdirSync, unlinkSync } from "node:fs";
@@ -168,10 +167,6 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
     ? new HerdrTransport(herdrWorkspaceId, serfTabId, config?.actorAgent ?? config?.agent, config?.actorModel ?? config?.model)
     : new HeadlessTransport(config?.terminal ?? "auto", config?.actorAgent ?? config?.agent, config?.actorModel ?? config?.model);
 
-  const escalationTransport: Transport = useHerdr && herdrWorkspaceId
-    ? new HerdrTransport(herdrWorkspaceId, serfTabId, config?.masterAgent ?? config?.agent, config?.masterModel ?? config?.model)
-    : new HeadlessTransport(config?.terminal ?? "auto", config?.masterAgent ?? config?.agent, config?.masterModel ?? config?.model);
-
   const visibility: VisibilityLayer = useHerdr && herdrWorkspaceId ? new HerdrVisibility(serfTabId) : new NoopVisibility();
 
   console.log("\n  ═══ SERF DARK FACTORY ═══════════════════════");
@@ -316,17 +311,13 @@ async function processCard(
 
   if (result === "review" && herdrWorkspaceId && herdrRootPaneId) {
     console.log(`    → Launching master + critic evaluation of failure...`);
-    await escalateToMasterCritic(card, herdrWorkspaceId, herdrRootPaneId, options_model(model), serfTabId);
+    await escalateToMasterCritic(card, herdrWorkspaceId, herdrRootPaneId, model, serfTabId);
   }
 
   if (worktreePath) {
     removeWorktree(card, result === "done");
     console.log(`    → worktree ${result === "done" ? "merged" : "discarded"}`);
   }
-}
-
-function options_model(model?: string): string | undefined {
-  return model;
 }
 
 async function runPlanPhase(
@@ -541,7 +532,7 @@ async function executeWithCritique(
   addOpenFailure(`${card.title}: max retries exceeded`);
   syncVerificationToCard(card, [
     `Fail: max ${MAX_RETRIES} attempts`,
-    `Issues: ${verdict_failed_issues(card)}`,
+    `Issues: ${lastFailedCriteria.join("; ") || "see card for details"}`,
   ]);
   writeCard(card);
   recordOutcome({
@@ -560,10 +551,6 @@ async function executeWithCritique(
   writeTrace(skillName, `${card.id}-final`, `# Trace: ${card.title}\n\n## Task\n${card.task}\n\n## What went wrong\n${previousFeedback}\n`);
   appendFailureMode(skillName, previousFeedback);
   return "review";
-}
-
-function verdict_failed_issues(card: Card): string {
-  return `See card ${card.id} for details`;
 }
 
 function finishCard(card: Card, output: string, quality: number, cbudget: CardBudget): void {
@@ -811,7 +798,6 @@ async function runSkillSerf(
   try { unlinkSync(resultPath); } catch {}
 }
 
-export { readCard, moveCard, listCards, writeCard, addTask, type Card };
 async function cleanupSpawnedSerfsForCard(serfTabId?: string): Promise<void> {
   if (!serfTabId) return;
   const { closePane } = await import("./herdr-client");
@@ -822,10 +808,3 @@ async function cleanupSpawnedSerfsForCard(serfTabId?: string): Promise<void> {
     }
   }
 }
-
-export { createSerf, readSerf, listSerfs, type SerfIdentity };
-export { critique, parseVerdict, type CriticVerdict };
-export { callLLM, BudgetTracker };
-export { buildMasterPrompt, buildAgentPrompt };
-export { HeadlessTransport, HerdrTransport, FakeTransport, type Transport, type ActorRunResult };
-export { NoopVisibility, HerdrVisibility, type VisibilityLayer };
