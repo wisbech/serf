@@ -16,6 +16,7 @@ import { createRoutine, listRoutines, readRoutine, type Routine } from "./routin
 import { createSerf, listSerfs, readSerf, type SerfIdentity } from "./serf";
 import { choose } from "./choose";
 import { isHerdrRunning, isHerdrResponding } from "./herdr-client";
+import { renderMaturity } from "./maturity";
 
 const ARGS = process.argv.slice(2);
 
@@ -59,6 +60,7 @@ async function main() {
     case "watch":    handleWatch(args); return;
     case "routine":  handleRoutine(args); return;
     case "serf":     handleSerf(args); return;
+    case "maturity": handleMaturity(args); return;
     case "help":
     case "--help":
     case "-h":       printHelp(); return;
@@ -1131,6 +1133,12 @@ function handleSerf(args: string[]): void {
   console.log("Usage: serf serf [list|add <name>|show <name>]");
 }
 
+// ── MATURITY ──
+
+function handleMaturity(_args: string[]): void {
+  console.log("\n" + renderMaturity() + "\n");
+}
+
 // ── HELP ──
 
 function printHelp(): void {
@@ -1155,6 +1163,7 @@ USAGE:
   serf watch [--once] [--interval N]                   Live dashboard of board/events/trajectory
   serf routine [list|add <name>|show <name>]           Manage recurrent-action routines
   serf serf [list|add <name>|show <name>]              Manage sparring partners (serfs)
+  serf maturity                                       Show the novel→routine→code ladder
 
 PROVIDERS:
   serf supports any LLM backend you can reach:
