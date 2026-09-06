@@ -1,5 +1,5 @@
 import { readTrackRecords, type TrackRecord } from "./track-record";
-import { listRoutines } from "./routines";
+import { createRoutine, listRoutines, routineExists } from "./routines";
 
 export type MaturityStage = "novel" | "repetitive" | "routine" | "code";
 
@@ -73,6 +73,31 @@ export function promotionSuggestions(): { label: string; from: MaturityStage; to
     }
   }
   return suggestions;
+}
+
+export function promoteToRoutine(label: string): { routine?: string; reason?: string } {
+  const clusters = clusterTasks(readTrackRecords());
+  const cluster = clusters.find((c) => c.label === label);
+  if (!cluster) return { reason: `no task cluster "${label}" found` };
+  if (cluster.stage !== "repetitive") {
+    return { reason: `"${label}" is [${cluster.stage}], not [repetitive] — nothing to promote` };
+  }
+  if (cluster.hasRoutine || routineExists(slugify(label))) {
+    return { reason: `a routine for "${label}" already exists` };
+  }
+  const name = slugify(label);
+  const trigger = label.toLowerCase().split(/\s+/).filter((w) => w.length > 3).join(" ");
+  createRoutine({
+    name,
+    description: `Auto-promoted from repeated work: ${label}`,
+    trigger,
+    steps: ["Understand the task context", "Read any accumulated lessons for this work", "Execute the task", "Run the verification command", "Report the result"],
+    verification: "bun test",
+    parallel: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  return { routine: name };
 }
 
 export function renderMaturity(): string {

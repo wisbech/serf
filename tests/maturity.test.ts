@@ -1,6 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { clusterTasks, promotionSuggestions } from "../src/maturity";
+import { clusterTasks, promotionSuggestions, promoteToRoutine } from "../src/maturity";
 import { recordOutcome } from "../src/track-record";
+import { routineExists } from "../src/routines";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -69,5 +70,22 @@ describe("Maturity ladder", () => {
 
     const suggestions = promotionSuggestions();
     expect(suggestions.some((s) => s.label === "reconcile invoices" && s.to === "routine")).toBe(true);
+  });
+
+  test("promoteToRoutine creates a routine from a repetitive task", () => {
+    rec("reconcile invoices", "pass");
+    rec("reconcile invoices", "pass");
+    rec("reconcile invoices", "pass");
+
+    const result = promoteToRoutine("reconcile invoices");
+    expect(result.routine).toBe("reconcile-invoices");
+    expect(routineExists("reconcile-invoices")).toBe(true);
+  });
+
+  test("promoteToRoutine refuses non-repetitive and already-routine tasks", () => {
+    rec("fix auth bug", "pass"); // 1x, novel
+    const novel = promoteToRoutine("fix auth bug");
+    expect(novel.reason).toContain("not [repetitive]");
+    expect(routineExists("fix-auth-bug")).toBe(false);
   });
 });

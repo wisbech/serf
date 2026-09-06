@@ -16,7 +16,7 @@ import { createRoutine, listRoutines, readRoutine, type Routine } from "./routin
 import { createSerf, listSerfs, readSerf, type SerfIdentity } from "./serf";
 import { choose } from "./choose";
 import { isHerdrRunning, isHerdrResponding } from "./herdr-client";
-import { renderMaturity } from "./maturity";
+import { renderMaturity, promoteToRoutine } from "./maturity";
 
 const ARGS = process.argv.slice(2);
 
@@ -1135,8 +1135,22 @@ function handleSerf(args: string[]): void {
 
 // ── MATURITY ──
 
-function handleMaturity(_args: string[]): void {
+function handleMaturity(args: string[]): void {
+  const promoteFlag = args.indexOf("--promote");
+  if (promoteFlag >= 0) {
+    const label = args[promoteFlag + 1];
+    if (!label) { console.log("Usage: serf maturity --promote <task-label>"); process.exit(1); }
+    const result = promoteToRoutine(label);
+    if (result.routine) {
+      console.log(`\n  ✓ Promoted "${label}" to routine "${result.routine}".`);
+      console.log(`    Future "${label}" tasks will skip the plan phase.\n`);
+    } else {
+      console.log(`\n  ⚠ ${result.reason}\n`);
+    }
+    return;
+  }
   console.log("\n" + renderMaturity() + "\n");
+  console.log("  Promote a repetitive task to a routine: serf maturity --promote \"<task label>\"\n");
 }
 
 // ── HELP ──
@@ -1164,6 +1178,7 @@ USAGE:
   serf routine [list|add <name>|show <name>]           Manage recurrent-action routines
   serf serf [list|add <name>|show <name>]              Manage sparring partners (serfs)
   serf maturity                                       Show the novel→routine→code ladder
+  serf maturity --promote "<label>"                   Promote a repetitive task to a routine
 
 PROVIDERS:
   serf supports any LLM backend you can reach:
