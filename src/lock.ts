@@ -8,12 +8,17 @@ function lockPath(): string {
 
 function pidAlive(pid: number): boolean {
   if (!pid || pid <= 0) return false;
+  // process.kill(pid, 0) only checks the process *exists*, which is true even
+  // for stopped (T) or zombie (Z) processes. A stopped serf is not actually
+  // running work — treat it as stale so the lock can be reclaimed.
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err: any) {
     return err?.code === "EPERM";
   }
+  const out = require("node:child_process").execSync(`ps -o state= -p ${pid}`, { encoding: "utf-8" }).trim();
+  if (out.length === 0) return false;
+  return !/^[TZ]/.test(out);
 }
 
 export function readLock(): { pid: number; held: boolean } | null {

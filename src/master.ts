@@ -13,7 +13,7 @@ import { createCardBudget, trackPhaseUsage, isPhaseOverBudget, formatBudget, get
 import { createPrdStub, prdExists, syncDecisionsToCard, syncVerificationToCard } from "./prd";
 import { buildMasterPrompt, buildPlanAgentPrompt, buildAgentPrompt } from "./prompts";
 import { getStateSummary, updateLastSession, addOpenFailure, addLesson } from "./state-file";
-import { appendFailureMode, writeTrace, createSkillFolder } from "./skills";
+import { appendFailureMode, writeTrace, createSkillFolder, getRelevantSkills } from "./skills";
 import type { Transport } from "./transport";
 import { HeadlessTransport, HerdrTransport, launchCouncil, launchInteractiveMasterConversation } from "./transport";
 import { qualifyModel } from "./agent-command";
@@ -309,15 +309,49 @@ async function processCard(
   await visibility.onTaskEnd(handle, { output: "", tokensUsed: 0, ok: result === "done" });
   await cleanupSpawnedSerfsForCard(serfTabId);
 
-  if (result === "review" && herdrWorkspaceId && herdrRootPaneId) {
-    console.log(`    → Launching master + critic evaluation of failure...`);
-    await escalateToMasterCritic(card, herdrWorkspaceId, herdrRootPaneId, model, serfTabId);
+  if (result === "review") {
+    if (herdrWorkspaceId && herdrRootPaneId) {
+      console.log(`    → Actor failed. Spawning a debugger serf to pick it up...`);
+      const debugFixed = await runDebugSerf(card, transport, serfBase, herdrWorkspaceId, serfTabId, model);
+      if (debugFixed) {
+        result = "done";
+        card.quality = 0.9;
+        card.updatedAt = new Date().toISOString();
+        writeCard(card);
+        moveCard(card.id, "done");
+        appendEvent("task.completed", { card: card.id, via: "debug-serf", quality: 0.9 });
+      } else {
+        console.log(`    → Debugger serf could not fix it. Filing an issue for a software/master serf...`);
+        fileIssue(card);
+      }
+    } else {
+      console.log(`    → No debug transport. Filing an issue for a software/master serf...`);
+      fileIssue(card);
+    }
   }
 
   if (worktreePath) {
     removeWorktree(card, result === "done");
     console.log(`    → worktree ${result === "done" ? "merged" : "discarded"}`);
   }
+}
+
+function fileIssue(card: Card): void {
+  const issueTitle = `[issue] ${card.title}`;
+  const existing = listCards().some((c) => c.title === issueTitle && c.column !== "done");
+  if (existing) return;
+  addTask(
+    issueTitle,
+    `This task failed review and needs a more skilled serf. Original: \n${card.title}\n\n${card.task}\n\nContext: ${card.context ?? "see history"}`,
+    `Resolve the root cause of: ${card.title}`,
+    `Investigate the failure, fix the underlying issue, and verify it passes the acceptance criteria`,
+    card.acceptance,
+    `Filed as an issue because the actor (and a debugger serf) could not resolve it. See events for the failure trace.`,
+    "software",
+  );
+  appendEvent("issue.filed", { card: card.id, title: card.title });
+  addOpenFailure(`${card.title}: filed as issue for software serf`);
+  console.log(`    → Issue filed: ${issueTitle} (assigned @software)`);
 }
 
 async function runPlanPhase(
@@ -631,6 +665,55 @@ function removeWorktree(card: Card, merge: boolean): void {
 
   try { execSync(`git worktree remove --force "${worktreePath}"`, { stdio: "pipe" }); } catch {}
   try { execSync(`git branch -D ${card.id} 2>/dev/null`, { stdio: "pipe" }); } catch {}
+}
+
+async function runDebugSerf(
+  card: Card,
+  transport: Transport,
+  serfBase: string,
+  workspaceId: string,
+  serfTabId?: string,
+  model?: string,
+): Promise<boolean> {
+  const config = loadConfig();
+  const agentName = config?.spawnAgent ?? config?.agent ?? "pi";
+  const serfModel = model ?? config?.actorModel ?? config?.model;
+  const relevant = getRelevantSkills(card);
+
+  const debugPrompt = `You are a debugger serf. An actor serf could not complete this task. Debug it and get it passing.
+Read the existing output at ${join(serfBase, "board", "in-progress", `${card.id}-output.md`)} to see what was tried.
+
+TASK:
+${card.task}
+
+GOAL: ${card.goal}
+
+ACCEPTANCE CRITERIA:
+${card.acceptance.map((a) => `- ${a}`).join("\n")}
+
+RELEVANT LESSONS & FAILURE MODES:
+${relevant || "(none)"}
+
+Debug the failure. Fix the underlying code so the acceptance criteria are met and the verification command passes. Write your result to ${join(serfBase, "board", "in-progress", `${card.id}-debug.md`)} and end with SERF_TASK_DONE.`;
+
+  try {
+    const result = await transport.run(debugPrompt, {
+      cwd: process.cwd(),
+      timeoutMs: 600_000,
+      outputFile: join(serfBase, "board", "in-progress", `${card.id}-debug.md`),
+      label: `debug: ${card.title.slice(0, 30)}`,
+      model: serfModel,
+    });
+
+    const verification = parseVerification(result.output);
+    const green = isVerificationGreen(verification);
+    const passText = result.output.includes("VERDICT: pass") || result.output.includes("ACCEPTANCE: pass") || green;
+    console.log(`    → Debugger serf: ${green ? `green (exit ${verification.exitCode})` : "not green"}`);
+    return passText && result.ok;
+  } catch (err) {
+    console.log(`    ⚠ debug serf failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
 }
 
 async function escalateToMasterCritic(
