@@ -586,6 +586,20 @@ function ensureSeeded(): void {
   ]) {
     ensureDir(join(serfDir, dir));
   }
+
+  cleanTmp();
+}
+
+function cleanTmp(): void {
+  const tmpDir = join(getSerfDir(), "tmp");
+  if (!existsSync(tmpDir)) return;
+  const preserve = new Set(["serf.pid", "scheduler-state.json"]);
+  try {
+    for (const f of readdirSync(tmpDir)) {
+      if (preserve.has(f)) continue;
+      try { unlinkSync(join(tmpDir, f)); } catch {}
+    }
+  } catch {}
 }
 
 function createWorktree(card: Card): string | null {
