@@ -396,6 +396,7 @@ export class HerdrTransport implements Transport {
     try { unlinkSync(promptFile); } catch {}
 
     const { output, ok } = parseOutput(raw);
+    await herdr.reportAgentState(this.paneId, agentName, ok ? "done" : "blocked", opts.label).catch(() => {});
     return { output, tokensUsed: estimateTokens(output), ok };
   }
 }

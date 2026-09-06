@@ -73,7 +73,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
   const transportOverride = options.transport;
   let useHerdr = transportOverride
     ? transportOverride === "herdr"
-    : isHerdrRunning() && (config.transport ?? "herdr") === "herdr";
+    : isHerdrRunning();
   if (useHerdr) {
     const responding = await isHerdrResponding();
     if (!responding) {
