@@ -386,14 +386,29 @@ async function runPlanPhase(
 }
 
 async function critiquePlanSimple(card: Card, plan: string): Promise<{ verdict: CriticVerdict; tokensUsed: number }> {
+  const { detectProjectType } = await import("./capabilities");
+  const projectType = detectProjectType(process.cwd());
+
+  const criteria = projectType === "docs"
+    ? [
+        "Addresses every acceptance criterion with a concrete step.",
+        "Names the deliverable document(s) with version and date.",
+        "Includes a verification step (file exists, content check, or git diff).",
+        "Identifies risky or uncertain steps.",
+        "Feasible for a single agent to execute.",
+      ]
+    : [
+        "Addresses every acceptance criterion with a concrete step.",
+        "Names files that will be created or modified.",
+        "Includes a verification step (test, build, lint, typecheck).",
+        "Identifies risky or uncertain steps.",
+        "Feasible for a single coding agent to execute.",
+      ];
+
   const prompt = `You are a plan critic. Decide whether the plan is good enough to execute.
 
 A plan must satisfy ALL to pass:
-1. Addresses every acceptance criterion with a concrete step.
-2. Names files that will be created or modified.
-3. Includes a verification step (test, build, lint, typecheck).
-4. Identifies risky or uncertain steps.
-5. Feasible for a single coding agent to execute.
+${criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 
 TASK:
 ${card.task}

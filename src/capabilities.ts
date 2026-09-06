@@ -8,10 +8,24 @@ export interface Capabilities {
   herdr: boolean;
   packageManagers: Record<string, boolean>;
   languages: Record<string, boolean>;
+  projectType: "code" | "docs" | "unknown";
 }
 
 const AGENTS = ["claude", "opencode", "aider", "pi", "hermes", "codex", "cursor", "code"];
 const RUNTIMES = ["bun", "node", "deno", "python3", "python", "uv", "cargo", "go", "ruby", "php"];
+
+export function detectProjectType(projectRoot: string = process.cwd()): "code" | "docs" | "unknown" {
+  const files = new Set(readdirSafe(projectRoot));
+  const codeMarkers = [
+    "package.json", "Cargo.toml", "pyproject.toml", "go.mod", "requirements.txt",
+    "bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+    "tsconfig.json", "src", "lib", "index.ts", "main.py", "main.go",
+  ];
+  if (codeMarkers.some((m) => files.has(m))) return "code";
+  const docMarkers = ["README.md", "docs", "wiki", "CONTEXT.md", "AGENTS.md", "CLAUDE.md"];
+  if (docMarkers.some((m) => files.has(m))) return "docs";
+  return "unknown";
+}
 
 export function detectCapabilities(projectRoot: string = process.cwd()): Capabilities {
   return {
@@ -19,6 +33,7 @@ export function detectCapabilities(projectRoot: string = process.cwd()): Capabil
     herdr: isHerdrRunning(),
     packageManagers: detectPackageManagers(projectRoot),
     languages: detectRuntimes(),
+    projectType: detectProjectType(projectRoot),
   };
 }
 
