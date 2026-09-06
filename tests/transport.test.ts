@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { FakeTransport, HeadlessTransport, HerdrTransport, waitForOutputFile, type Transport, type RunOpts } from "../src/transport";
+import { FakeTransport, HeadlessTransport, HerdrTransport, waitForOutputFile, matchesType, type Transport, type RunOpts } from "../src/transport";
 import { buildInvocation, listAgents, isHeadless, qualifyModel } from "../src/agent-command";
 import { writeFileSync, mkdtempSync, rmSync, utimesSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -151,5 +151,28 @@ describe("waitForOutputFile", () => {
     expect(result).toContain("SERF_TASK_DONE");
 
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("matchesType", () => {
+  test("exact match", () => {
+    expect(matchesType("proposal", "proposal")).toBe(true);
+  });
+
+  test("prefix match: proposal.written matches proposal subscription", () => {
+    expect(matchesType("proposal.written", "proposal")).toBe(true);
+  });
+
+  test("prefix match: critique.written matches critique subscription", () => {
+    expect(matchesType("critique.written", "critique")).toBe(true);
+  });
+
+  test("no match for unrelated types", () => {
+    expect(matchesType("verdict", "proposal")).toBe(false);
+    expect(matchesType("proposal", "critique")).toBe(false);
+  });
+
+  test("does not match partial word prefixes", () => {
+    expect(matchesType("proposals", "proposal")).toBe(false);
   });
 });

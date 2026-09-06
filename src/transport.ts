@@ -508,19 +508,19 @@ export async function launchInteractiveMasterConversation(
 
     const unsubTrajectory = subscribeToTrajectory("*", (step) => {
       for (const sub of allSubs) {
-        if (!sub.types.includes(step.type)) continue;
+        if (!sub.types.some((t) => matchesType(step.type, t))) continue;
         if (step.source === sub.role && !sub.trigger_self) continue;
 
-        if (step.type === "proposal" && sub.role === "critic") {
+        if (matchesType(step.type, "proposal") && sub.role === "critic") {
           routeToPane("critic", `Read ${proposalFile} and write your evaluation to ${critiqueFile}. Be adversarial. When done, run: serf emit critique.written file=.serf/tmp/critique.md --source critic`);
-        } else if (step.type === "critique" && sub.role === "master") {
+        } else if (matchesType(step.type, "critique") && sub.role === "master") {
           routeToPane("master", `Read ${critiqueFile}. The critic has reviewed your proposal. Revise if needed (then run serf emit proposal.written --source master again), or write a card to .serf/board/backlog/ if you agree (then run serf emit card.written --source master).`);
-        } else if (step.type === "work" && sub.role === "critic") {
+        } else if (matchesType(step.type, "work") && sub.role === "critic") {
           const output = step.payload?.outputFile ? `Read ${step.payload.outputFile} and evaluate the actor's work.` : `Evaluate the work output.`;
           routeToPane("critic", `${output} Write your verdict and run: serf emit verdict card=${step.payload?.cardId ?? ""} --source critic`);
-        } else if (step.type === "verdict" && sub.role === "master") {
+        } else if (matchesType(step.type, "verdict") && sub.role === "master") {
           routeToPane("master", `The critic has verdicted: ${JSON.stringify(step.payload)}. Update the board accordingly.`);
-        } else if (step.type === "serf.completed" && sub.role === "master") {
+        } else if (matchesType(step.type, "serf.completed") && sub.role === "master") {
           routeToPane("master", `Serf completed task: ${JSON.stringify(step.payload)}. Check the board and proceed.`);
         }
       }
@@ -611,6 +611,10 @@ export async function launchInteractiveMasterConversation(
 }
 
 // ── COUNCIL: MASTER + N SPARRING PARTNERS ──
+
+export function matchesType(stepType: string, subType: string): boolean {
+  return stepType === subType || stepType.startsWith(subType + ".");
+}
 
 export interface CouncilOptions {
   cwd: string;
@@ -705,11 +709,11 @@ export async function launchCouncil(
   };
 
   const unsubTrajectory = subscribeToTrajectory("*", (step) => {
-    if (step.type === "proposal") {
+    if (matchesType(step.type, "proposal")) {
       for (const p of partners) {
         routeToPane(p.name, `Read ${proposalFile} and write your evaluation to .serf/tmp/critique-${p.name}.md. Be adversarial through your lens. When done, run: serf emit critique.written file=.serf/tmp/critique-${p.name}.md --source ${p.name}`);
       }
-    } else if (step.type === "critique") {
+    } else if (matchesType(step.type, "critique")) {
       const source = step.source;
       if (source && source !== "master") {
         routeToPane("master", `Read .serf/tmp/critique-${source}.md. ${source} has reviewed your proposal. Revise if needed (then run serf emit proposal.written --source master again), or write a card to .serf/board/backlog/ if you agree (then run serf emit card.written --source master).`);
