@@ -970,13 +970,13 @@ function handleAgents(args: string[]): void {
 
 // ── WATCH ──
 
-function handleWatch(args: string[]): void {
+async function handleWatch(args: string[]): Promise<void> {
   const once = args.includes("--once");
   const intervalFlag = args.indexOf("--interval");
   const intervalMs = intervalFlag >= 0 ? parseInt(args[intervalFlag + 1], 10) * 1000 : 2000;
 
   if (once) {
-    console.log(renderDashboard());
+    console.log(await renderDashboard());
     return;
   }
 

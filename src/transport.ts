@@ -373,6 +373,8 @@ export class HerdrTransport implements Transport {
         }
       }
       this.paneId = pane.pane_id;
+    } else if (opts.label) {
+      await herdr.labelPane(this.paneId, opts.label).catch(() => {});
     }
 
     const promptFile = join(serfTmp(), `prompt-${Date.now()}.md`);

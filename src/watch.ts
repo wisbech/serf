@@ -4,6 +4,7 @@ import { getSerfDir } from "./paths";
 import { listCards, type Card } from "./board";
 import { readTrackRecords } from "./track-record";
 import { listRoutines } from "./routines";
+import { isHerdrRunning, listPanes, type PaneInfo } from "./herdr-client";
 
 function eventsDir(): string { return join(getSerfDir(), "events"); }
 function trajectoryFile(): string { return join(getSerfDir(), "trajectory.jsonl"); }
@@ -125,12 +126,46 @@ function renderRoutines(): string {
   return lines.join("\n");
 }
 
-export function renderDashboard(): string {
+function agentStateIcon(state: string): string {
+  switch (state) {
+    case "working": return color("36", "●");
+    case "blocked": return color("31", "●");
+    case "done": return color("32", "●");
+    case "idle": return color("33", "○");
+    default: return color("90", "○");
+  }
+}
+
+function renderAgents(panes: PaneInfo[]): string {
+  const lines: string[] = [];
+  lines.push(color("1;37", "── AGENTS (herdr) ─────────────────────────────────"));
+  if (panes.length === 0) {
+    lines.push("  (no herdr panes — start herdr to see live agents)");
+    return lines.join("\n");
+  }
+  for (const p of panes) {
+    const label = p.label || p.display_agent || p.pane_id;
+    const agent = p.agent || p.display_agent || "—";
+    const state = p.agent_status || "unknown";
+    lines.push(`  ${agentStateIcon(state)} ${label.slice(0, 30)} [${agent}] ${state}`);
+  }
+  return lines.join("\n");
+}
+
+export async function renderDashboard(): Promise<string> {
   const events = readRecentEvents(15);
   const trajectory = readRecentTrajectory(15);
+  let agents: PaneInfo[] = [];
+  if (isHerdrRunning()) {
+    try {
+      agents = await listPanes();
+    } catch {}
+  }
   return [
     color("1;36", "╔══ SERF LIVE ═══════════════════════════════════════╗"),
     renderBoard(),
+    "",
+    renderAgents(agents),
     "",
     renderEvents(events),
     "",
@@ -145,10 +180,10 @@ export function renderDashboard(): string {
 
 export function watchDashboard(intervalMs = 2000): () => void {
   let running = true;
-  const tick = () => {
+  const tick = async () => {
     if (!running) return;
     process.stdout.write("\x1b[2J\x1b[H");
-    process.stdout.write(renderDashboard() + "\n");
+    process.stdout.write((await renderDashboard()) + "\n");
     process.stdout.write(color("90", `\n  Refreshing every ${intervalMs / 1000}s. Ctrl+C to exit.`));
   };
   tick();
