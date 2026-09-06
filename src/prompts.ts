@@ -30,7 +30,7 @@ You have shell access. These serf commands are available to you at any time:
 
 **Event protocol:**
 - After writing .serf/tmp/master-proposal.md → run \`serf emit proposal.written file=.serf/tmp/master-proposal.md --source master\`
-- After writing a card to .serf/board/backlog/ → run \`serf emit card.written --source master\`
+- The harness watches the board and picks up cards as you write them — no event needed.
 - The harness will notify you when the critic writes a critique — you don't need to poll.
 
 If the critic pane is dead or unresponsive, run \`serf respawn critic\` to bring it back.

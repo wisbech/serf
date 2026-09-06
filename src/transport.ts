@@ -516,7 +516,7 @@ export async function launchInteractiveMasterConversation(
         if (matchesType(step.type, "proposal") && sub.role === "critic") {
           routeToPane("critic", `Read ${proposalFile} and write your evaluation to ${critiqueFile}. Be adversarial. When done, run: serf emit critique.written file=.serf/tmp/critique.md --source critic`);
         } else if (matchesType(step.type, "critique") && sub.role === "master") {
-          routeToPane("master", `Read ${critiqueFile}. The critic has reviewed your proposal. Revise if needed (then run serf emit proposal.written --source master again), or write a card to .serf/board/backlog/ if you agree (then run serf emit card.written --source master).`);
+          routeToPane("master", `Read ${critiqueFile}. The critic has reviewed your proposal. Revise if needed (then run serf emit proposal.written --source master again), or write a card to .serf/board/backlog/ if you agree.`);
         } else if (matchesType(step.type, "work") && sub.role === "critic") {
           const output = step.payload?.outputFile ? `Read ${step.payload.outputFile} and evaluate the actor's work.` : `Evaluate the work output.`;
           routeToPane("critic", `${output} Write your verdict and run: serf emit verdict card=${step.payload?.cardId ?? ""} --source critic`);
@@ -718,7 +718,7 @@ export async function launchCouncil(
     } else if (matchesType(step.type, "critique")) {
       const source = step.source;
       if (source && source !== "master") {
-        routeToPane("master", `Read .serf/tmp/critique-${source}.md. ${source} has reviewed your proposal. Revise if needed (then run serf emit proposal.written --source master again), or write a card to .serf/board/backlog/ if you agree (then run serf emit card.written --source master).`);
+        routeToPane("master", `Read .serf/tmp/critique-${source}.md. ${source} has reviewed your proposal. Revise if needed (then run serf emit proposal.written --source master again), or write a card to .serf/board/backlog/ if you agree.`);
       }
     }
   });
