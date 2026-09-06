@@ -418,8 +418,8 @@ function checkStaleProcesses(): void {
 
   try {
     const out = execSync(`ps -axo pid=,command= | grep -E "bun .*serf( |$)" | grep -v grep`, { encoding: "utf-8" });
-    const lines = out.split("\n").map(l => l.trim()).filter(Boolean);
-    const others = lines.filter(l => !l.startsWith(String(process.pid)));
+    const lines = out.split("\n").map((l: string) => l.trim()).filter(Boolean);
+    const others = lines.filter((l: string) => !l.startsWith(String(process.pid)));
     if (others.length > 0) {
       console.log(`  ═══ SERF HEALTH — STALE PROCESSES ═══════════`);
       console.log(`  ⚠ ${others.length} orphaned serf process(es) detected:`);
@@ -603,7 +603,7 @@ async function handleProviders(args: string[]): Promise<void> {
   }
 
   if (args[0] === "set" && args[1]) {
-    const provider = args[1];
+    const provider = args[1] as any;
     const config = loadConfig();
     config.provider = provider;
     config.model = args[2] || defaultModelForProvider(provider);

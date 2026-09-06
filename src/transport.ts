@@ -377,6 +377,8 @@ export class HerdrTransport implements Transport {
       await herdr.labelPane(this.paneId, opts.label).catch(() => {});
     }
 
+    const paneId = this.paneId!;
+
     const promptFile = join(serfTmp(), `prompt-${Date.now()}.md`);
     writeFileSync(promptFile, prompt);
 
@@ -386,19 +388,19 @@ export class HerdrTransport implements Transport {
       const fixedInv = buildInteractiveInvocation(agentName, providerModel);
       argStr = fixedInv.args.map((a) => JSON.stringify(a)).join(" ");
     }
-    await herdr.sendCommand(this.paneId, `cd "${opts.cwd}" && ${agentName} ${argStr}`);
-    await herdr.reportAgentState(this.paneId, agentName, "working", opts.label).catch(() => {});
+    await herdr.sendCommand(paneId, `cd "${opts.cwd}" && ${agentName} ${argStr}`);
+    await herdr.reportAgentState(paneId, agentName, "working", opts.label).catch(() => {});
 
     await new Promise((r) => setTimeout(r, 10_000));
 
-    await herdr.sendCommand(this.paneId, `Read ${promptFile} and follow the instructions. Write your output to ${opts.outputFile} and end with SERF_TASK_DONE.`);
+    await herdr.sendCommand(paneId, `Read ${promptFile} and follow the instructions. Write your output to ${opts.outputFile} and end with SERF_TASK_DONE.`);
 
-    const raw = await waitForPaneIdle(this.paneId, opts.outputFile, opts.timeoutMs);
+    const raw = await waitForPaneIdle(paneId, opts.outputFile, opts.timeoutMs);
 
     try { unlinkSync(promptFile); } catch {}
 
     const { output, ok } = parseOutput(raw);
-    await herdr.reportAgentState(this.paneId, agentName, ok ? "done" : "blocked", opts.label).catch(() => {});
+    await herdr.reportAgentState(paneId, agentName, ok ? "done" : "blocked", opts.label).catch(() => {});
     return { output, tokensUsed: estimateTokens(output), ok };
   }
 }

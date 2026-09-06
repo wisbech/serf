@@ -117,11 +117,11 @@ function checkTests(): CheckResult & { testCounts?: HealthReport["testCounts"] }
 }
 
 function checkTypeScript(): CheckResult {
-  const tscExists = run("npx", ["tsc", "--version"], 10_000);
+  const tscExists = run("bunx", ["tsc", "--version"], 10_000);
   if (tscExists.status !== 0) {
     return { name: "tsc --noEmit", passed: true, details: "Skipped (tsc not available)", durationMs: 0 };
   }
-  const r = run("npx", ["tsc", "--noEmit", "--skipLibCheck"], 60_000);
+  const r = run("bunx", ["tsc", "--noEmit"], 60_000);
   const passed = r.status === 0;
   let details = passed ? "No type errors" : `Type errors found (exit ${r.status})`;
   if (!passed && r.stdout) {

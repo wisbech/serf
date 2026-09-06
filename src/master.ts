@@ -15,7 +15,7 @@ import { buildMasterPrompt, buildPlanAgentPrompt, buildAgentPrompt } from "./pro
 import { getStateSummary, updateLastSession, addOpenFailure, addLesson } from "./state-file";
 import { appendFailureMode, writeTrace, createSkillFolder } from "./skills";
 import type { Transport } from "./transport";
-import { HeadlessTransport, HerdrTransport, launchCouncil } from "./transport";
+import { HeadlessTransport, HerdrTransport, launchCouncil, launchInteractiveMasterConversation } from "./transport";
 import { qualifyModel } from "./agent-command";
 import { NoopVisibility, HerdrVisibility, type VisibilityLayer } from "./visibility";
 import { isHerdrRunning, isHerdrResponding, createWorkspace, listWorkspaces, type PaneInfo } from "./herdr-client";
@@ -473,8 +473,8 @@ async function executeWithCritique(
       }
     }
 
-    const { verdict, tokensUsed } = await critique(card.task, runResult.output, card.acceptance);
-    trackPhaseUsage(cbudget, "critic", tokensUsed);
+    const { verdict, result } = await critique(card.task, runResult.output, card.acceptance);
+    trackPhaseUsage(cbudget, "critic", result.tokensUsed);
 
     console.log(`    ┌── CRITIC ──────────────────────────`);
     console.log(`    │ Verdict: ${verdict.verdict.toUpperCase()}`);

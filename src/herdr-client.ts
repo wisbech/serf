@@ -1,5 +1,5 @@
 import { connect } from "node:net";
-import { existsSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
@@ -17,6 +17,7 @@ export interface PaneInfo {
   agent?: string;
   cwd?: string;
   label?: string;
+  display_agent?: string;
 }
 
 export interface WorkspaceInfo {
@@ -271,7 +272,7 @@ export async function waitForAgentExit(paneId: string, _timeoutMs = 600_000): Pr
     if (checkReceipt()) return;
 
     try {
-      const watcher = watch(tmpDir, (_eventType, filename) => {
+      const watcher = watch(tmpDir, (_eventType: string, filename: string | null) => {
         if (filename && filename === `${paneId}-done`) {
           checkReceipt();
         }

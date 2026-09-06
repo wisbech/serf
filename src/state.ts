@@ -36,6 +36,7 @@ export interface Config {
   criticBackend?: string;
   selfCorrectTurns?: number;
   maxRounds?: number;
+  modelTiers?: Record<string, string>;
 }
 
 function findConfigPath(): string | null {
