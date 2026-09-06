@@ -915,7 +915,7 @@ function handleConfig(args: string[]): void {
     const value = args[2];
     if (!key || value === undefined) {
       console.log("Usage: serf config set <key> <value>");
-      console.log("Keys: agent, spawnAgent, actorAgent, criticAgent, masterAgent, terminal, model, actorModel, criticModel, masterModel, backend, masterBackend, criticBackend, transport, provider, endpoint, apiKey, maxMemoryMB, memoryWarnMB, selfCorrectTurns");
+      console.log("Keys: agent, spawnAgent, actorAgent, criticAgent, masterAgent, terminal, model, actorModel, criticModel, masterModel, backend, masterBackend, criticBackend, transport, provider, endpoint, apiKey, maxMemoryMB, memoryWarnMB, selfCorrectTurns, maxRounds");
       process.exit(1);
     }
     const config = loadConfig();
