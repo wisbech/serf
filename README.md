@@ -71,10 +71,41 @@ The folder evolves. Every task adds to it. Knowledge compounds. A serf starting 
 The critic evaluates actor output against the task's acceptance criteria. By default it's an inline multi-pass LLM call. When herdr is running, it can be a separate agent in its own pane with a different model.
 
 - **Per-criterion evaluation** — each acceptance criterion gets YES/NO/CANNOT_EVALUATE with evidence
-- **Multi-pass** — N independent evaluations; agreement rate determines confidence
+- **Verification-first** — the actor must report a green verification command (`VERIFICATION_EXIT_CODE: 0`) before the critic passes it
+- **Self-correction** — the actor gets up to `selfCorrectTurns` internal turns to fix a red verification before the critic sees it
 - **Adversarial prompt** — the critic is told to find reasons to FAIL, not to be fair
 - **3 fails = bad task** — if a serf fails 3 times, the task description is wrong, not the serf
 - **Curiosity** — disagreement between passes is logged to `knowledge/patterns/` for human review at decision boundaries
+
+## Sparring Partners
+
+The master doesn't debate alone. Any serf with a `.subs.json` subscribing to `proposal` becomes a sparring partner in a council:
+
+```bash
+serf serf add security --mission "find vulnerabilities" --subscribe proposal
+serf serf add perf --mission "find regressions" --subscribe proposal --advisory
+```
+
+- **Blocking** partners (default) — a high-confidence fail blocks the proposal
+- **Advisory** partners (`--advisory`) — inform but don't block
+- The council converges or escalates back to the master after `maxRounds`
+
+## Routines
+
+Recurrent, fuzzy-but-repeatable actions (respond to email, parse an order, pay a customer) are routines:
+
+```bash
+serf routine add check-inbox --trigger "inbox email" --steps "read; reply" --verify "done" --interval 900
+serf routine add parse-order --trigger "order invoice" --steps "parse; log" --verify "logged" --watch ./inbox
+```
+
+- A card whose title matches a routine's trigger skips the plan phase and executes the known steps
+- `--interval` runs it on a timer; `--watch` runs it when a file lands in a directory
+- The scheduler emits `routine.due` events; the master enqueues cards
+
+## Self-Optimization
+
+Serf records every outcome to `knowledge/track-record/` and routes future tasks to the model that has historically succeeded on similar work. The track record is visible in `serf watch`.
 
 ## Worktree Isolation (Best-Effort)
 
@@ -91,7 +122,7 @@ Each task gets its own git worktree — an isolated checkout where the agent wor
 |---------|-------------|
 | `serf .` | Init (if needed) and start — the default entry point |
 | `serf init` | Create `.serf/` folder structure in current project |
-| `serf start` | Launch master agent — surveys, discusses, processes tasks |
+| `serf start [--herdr\|--headless]` | Launch master — arrow-key prompt to pick transport |
 | `serf process [--once] [--budget N]` | Run the board loop in headless mode |
 | `serf task "do something"` | Add a card to backlog |
 | `serf board [show\|move <id> <column>]` | Show the kanban or move a card |
@@ -99,6 +130,11 @@ Each task gets its own git worktree — an isolated checkout where the agent wor
 | `serf providers [set <name>]` | List or set LLM provider |
 | `serf config [show\|set <k> <v>]` | Show or set project config |
 | `serf health [--gan] [--strict]` | Build + test + typecheck |
+| `serf watch [--once] [--interval N]` | Live dashboard: board, agents, events, trajectory |
+| `serf routine [list\|add\|show]` | Manage recurrent-action routines |
+| `serf serf [list\|add\|show]` | Manage sparring partners |
+| `serf emit <type> [key=value ...]` | Emit an event to the harness |
+| `serf traj [tail\|show\|full\|fork\|merge]` | Trajectory operations |
 
 ## Configuration
 
@@ -126,6 +162,24 @@ Project-local config (`.serf/config.json`):
   "model": "claude-sonnet-4-20250514",
   "criticAgent": "claude",
   "criticModel": "opus"
+}
+```
+
+**Lightweight agents:** use a memory-light agent (e.g. `pi`) for the actor to avoid opencode's memory footprint:
+
+```json
+{
+  "actorAgent": "pi",
+  "actorModel": "qwen3:8b"
+}
+```
+
+**Tuning the loop:**
+
+```json
+{
+  "selfCorrectTurns": 3,
+  "maxRounds": 3
 }
 ```
 
@@ -166,6 +220,7 @@ The following features are aspirational and not yet implemented:
 - herdr integration is developed but not yet battle-tested at scale
 - The system runs one task at a time; no parallel multi-agent execution
 - Budget tracking is simple token counting, not true cost accounting
+- `.serf/tmp/` accumulates stale message files between runs (cleanup is manual)
 
 ## Architecture
 

@@ -4,7 +4,7 @@
 >
 > **The folder is the state.** Everything you do is written to `.serf/` in the project root. Another agent reads the folder and continues. No process outlives its task.
 >
-> **One-shot execution.** Serf runs agents as one-shot commands (`opencode run`, `claude --print`, etc.), not as interactive TUI sessions. herdr panes are for visibility — watching the command run — not for driving it.
+> **Agents run in panes when herdr is live.** Serf launches the master, critic, and actor as persistent agents in herdr panes so you can watch and steer them. When herdr is absent, it falls back to one-shot headless commands (`opencode run`, `claude --print`).
 
 ---
 
@@ -63,13 +63,37 @@ Read `.serf/serfs/<your-name>.md`. It has your mission, persona, levers, measure
 After execution, your output is evaluated adversarially:
 
 - Each acceptance criterion gets **YES / NO / CANNOT_EVALUATE** with evidence
-- Multiple independent passes; agreement rate determines confidence
+- **Verification-first** — the actor must report a green verification command (`VERIFICATION_EXIT_CODE: 0`) before the critic even passes it
+- **Self-correction** — the actor gets up to `selfCorrectTurns` internal turns to fix a red verification before the critic sees it
 - Pass (agreement > 0.7) → task done, move to `done/`
 - Fail (agreement > 0.7) → retry with feedback (max 3 attempts)
 - Uncertain (low agreement) → logged as curiosity point for human review
 - 3 high-confidence fails → the task description is bad, not you
 
 **Anti-cheat:** If you only described what you would do or only edited `.md` sidecar files, the critic will FAIL you. The task is the actual change in project source files.
+
+---
+
+## Sparring Partners
+
+The master doesn't debate alone. Any serf with a `.subs.json` subscribing to `proposal` becomes a sparring partner:
+
+- The critic is the default partner
+- `serf serf add <name> --subscribe proposal` adds more (security, performance, domain experts)
+- **Blocking** partners (default) — a high-confidence fail blocks the proposal
+- **Advisory** partners (`--advisory`) — inform but don't block
+- The council converges or escalates back to the master after `maxRounds`
+
+---
+
+## Routines
+
+Recurrent, fuzzy-but-repeatable actions (respond to email, parse an order, pay a customer) are **routines**:
+
+- `serf routine add <name> --trigger "..." --steps "a; b; c" --verify "..." [--interval N] [--watch <dir>]`
+- A card whose title matches a routine's trigger skips the plan phase and executes the known steps
+- `--interval` runs it on a timer; `--watch` runs it when a file lands in a directory
+- The scheduler emits `routine.due` events; the master enqueues cards
 
 ---
 
@@ -100,6 +124,10 @@ Append one JSON object per line to `.serf/events/<date>.jsonl`:
 | `feedback.recorded` | User accepts/refines |
 | `serf.spawned` | Master creates new serf |
 | `critic.verdict` | Critic evaluation result |
+| `verification.green` | Actor's verification command passed |
+| `verification.red` | Actor's verification command failed |
+| `routine.due` | Scheduler triggered a routine |
+| `routine.matched` | A card matched a routine |
 
 ---
 
