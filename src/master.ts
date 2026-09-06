@@ -773,11 +773,6 @@ async function runSkillSerf(
       });
       watcher.on("error", () => { if (!done) { done = true; resolve(); } });
     } catch {}
-
-    const interval = setInterval(() => {
-      if (done) { clearInterval(interval); return; }
-      if (check()) { clearInterval(interval); }
-    }, 60_000);
   });
 
   spawnedSerfs.delete(paneId);

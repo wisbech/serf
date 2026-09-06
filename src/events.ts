@@ -223,11 +223,8 @@ export function subscribeFromFile(pattern: string, handler: (e: SerfEvent) => vo
     watcher = { close: () => {} } as any;
   }
 
-  const interval = setInterval(readNew, 2000);
-
   const unsubscribe = () => {
     try { watcher.close(); } catch {}
-    clearInterval(interval);
     _fileWatchers = _fileWatchers.filter((w) => w.handler !== handler || w.pattern !== pattern);
   };
   _fileWatchers.push({ pattern, handler, watcher });
@@ -272,11 +269,8 @@ export function subscribeToTrajectory(pattern: string, handler: (step: Trajector
     watcher = { close: () => {} } as any;
   }
 
-  const interval = setInterval(readNew, 2000);
-
   return () => {
     try { watcher.close(); } catch {}
-    clearInterval(interval);
   };
 }
 
