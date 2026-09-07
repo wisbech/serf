@@ -164,6 +164,10 @@ ${persona}. Don't be nice — be right. If the master proposes something vague, 
 
 export function buildPlanAgentPrompt(card: Card, serf: SerfIdentity): string {
   const name = serf.name || "actor";
+  const projectType = detectProjectTypeForPrompt();
+  const verification = projectType === "docs"
+    ? "a content check (file exists, headings present, or git diff)."
+    : "a test, build, lint, or typecheck command.";
   return `You are ${name}. Your ONLY job: write a plan for this task. DO NOT edit any source files.
 
 Write the plan to .serf/board/in-progress/${card.id}-plan.md and end with the line SERF_PLAN_DONE.
@@ -171,7 +175,7 @@ Write the plan to .serf/board/in-progress/${card.id}-plan.md and end with the li
 The plan must:
 1. Reference every acceptance criterion.
 2. List the exact file paths you will create or modify.
-3. Include a verification command (test, build, lint, or typecheck).
+3. Include a verification step: ${verification}
 4. Be under 100 lines.
 
 GOAL: ${card.goal}
@@ -182,6 +186,15 @@ ACCEPTANCE CRITERIA:
 ${card.acceptance.map((a) => `- ${a}`).join("\n")}
 
 Write the plan now. Do not implement.`;
+}
+
+function detectProjectTypeForPrompt(): "code" | "docs" {
+  try {
+    const { detectProjectType } = require("./capabilities");
+    return detectProjectType(process.cwd());
+  } catch {
+    return "code";
+  }
 }
 
 export function buildAgentPrompt(card: Card, serf: SerfIdentity, feedback: string, attempt: number): string {

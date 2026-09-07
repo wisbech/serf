@@ -275,19 +275,23 @@ async function processCard(
 
   const serfBase = worktreePath ? join(worktreePath, ".serf") : getSerfDir();
 
-  let planOk = false;
+  let planResult: { ok: boolean; reason?: string } = { ok: false, reason: "no-plan-written" };
   try {
-    planOk = await runPlanPhase(card, cbudget, serfBase, transport, worktreePath);
+    planResult = await runPlanPhase(card, cbudget, serfBase, transport, worktreePath);
   } catch (err) {
     console.log(`  ⚠ plan phase failed: ${err instanceof Error ? err.message : String(err)}`);
+    planResult = { ok: false, reason: "error" };
   }
 
-  if (!planOk) {
-    card.context = "Plan critique failed or budget exhausted. Review plan and acceptance criteria.";
-    syncDecisionsToCard(card, ["Plan rejected by critic"]);
+  if (!planResult.ok) {
+    const rejected = planResult.reason === "pass" || planResult.reason === "fail" || planResult.reason === "uncertain";
+    card.context = rejected
+      ? "Plan rejected by critic. Review plan and acceptance criteria."
+      : `Plan phase failed (${planResult.reason ?? "unknown"}). No plan was produced.`;
+    syncDecisionsToCard(card, [rejected ? "Plan rejected by critic" : `Plan not produced (${planResult.reason ?? "unknown"})`]);
     writeCard(card);
     moveCard(card.id, "review");
-    appendEvent("task.failed", { card: card.id, reason: "plan-rejected" });
+    appendEvent("task.failed", { card: card.id, reason: rejected ? "plan-rejected" : `plan-${planResult.reason ?? "failed"}` });
     if (worktreePath) removeWorktree(card, false);
     return;
   }
@@ -360,7 +364,7 @@ async function runPlanPhase(
   serfBase: string,
   transport: Transport,
   worktreePath: string | null,
-): Promise<boolean> {
+): Promise<{ ok: boolean; reason?: string }> {
   const planPath = join(serfBase, "board", "in-progress", `${card.id}-plan.md`);
   const actorIdentity = readSerfSafe("actor");
   const planPrompt = buildPlanAgentPrompt(card, actorIdentity);
@@ -374,15 +378,23 @@ async function runPlanPhase(
 
   trackPhaseUsage(cbudget, "plan", estimateTokens(execResult.output));
 
+  const planWritten = existsSync(planPath) && readFileSync(planPath, "utf-8").trim().length > 0;
+
   if (!execResult.ok || isPhaseOverBudget(cbudget, "plan")) {
     console.log(`    ⚠ plan phase failed or over budget`);
-    return false;
+    return { ok: false, reason: execResult.ok ? "budget" : "no-plan-written" };
   }
 
-  const { verdict, tokensUsed } = await critiquePlanSimple(card, execResult.output);
+  if (!planWritten) {
+    console.log(`    ⚠ plan agent produced no plan file.`);
+    return { ok: false, reason: "no-plan-written" };
+  }
+
+  const plan = readFileSync(planPath, "utf-8");
+  const { verdict, tokensUsed } = await critiquePlanSimple(card, plan);
   trackPhaseUsage(cbudget, "plan", tokensUsed);
   console.log(`    → plan critique: ${verdict.verdict} (${verdict.reasoning})`);
-  return verdict.verdict === "pass";
+  return { ok: verdict.verdict === "pass", reason: verdict.verdict };
 }
 
 async function critiquePlanSimple(card: Card, plan: string): Promise<{ verdict: CriticVerdict; tokensUsed: number }> {
