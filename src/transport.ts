@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { writeFileSync, readFileSync, existsSync, unlinkSync, createWriteStream, watch, statSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, unlinkSync, createWriteStream, watch, statSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { buildInvocation, buildInteractiveInvocation, qualifyModel } from "./agent-command";
 import type { SandboxProfile } from "./sandbox";
@@ -37,6 +37,17 @@ function serfTmp(): string {
   const dir = join(getSerfDir(), "tmp");
   ensureDir(dir);
   return dir;
+}
+
+function cleanTmpFiles(pattern: RegExp): void {
+  const dir = serfTmp();
+  try {
+    for (const f of readdirSync(dir)) {
+      if (pattern.test(f)) {
+        try { unlinkSync(join(dir, f)); } catch {}
+      }
+    }
+  } catch {}
 }
 
 function buildWrapperScript(
@@ -334,6 +345,7 @@ export class HeadlessTransport implements Transport {
     const raw = await waitForOutputFile(opts.outputFile, opts.timeoutMs);
 
     try { unlinkSync(scriptPath); } catch {}
+    try { unlinkSync(`${scriptPath}.log`); } catch {}
 
     const { output, ok } = parseOutput(raw);
     return { output, tokensUsed: estimateTokens(output), ok };
@@ -589,6 +601,7 @@ export async function launchInteractiveMasterConversation(
 
     unsubTrajectory();
 
+    cleanTmpFiles(/^(master-prompt|critic-prompt|critique|master-proposal|prompt-).*\.md$/);
     const finalCards = listCards("backlog");
     return { ok: true, cardsWritten: finalCards.length, output: `Conversation ended. ${finalCards.length} cards on board.` };
   } else {
@@ -766,6 +779,7 @@ export async function launchCouncil(
 
   unsubTrajectory();
 
+  cleanTmpFiles(/^(master-prompt|critic-prompt|critique-.*|master-proposal|prompt-).*\.md$/);
   const finalCards = listCards("backlog");
   return { ok: true, cardsWritten: finalCards.length, output: `Council ended. ${finalCards.length} cards on board.` };
 }
@@ -800,6 +814,7 @@ async function runHeadlessCouncil(
 
     const cardsNow = listCards("backlog");
     if (cardsNow.length > 0) {
+      cleanTmpFiles(/^(master-round-|critique-).*\.md$/);
       return { ok: true, cardsWritten: cardsNow.length, output: `Master wrote ${cardsNow.length} card(s) directly.` };
     }
 
@@ -821,6 +836,9 @@ async function runHeadlessCouncil(
       console.log(`    ${p.name}: ${verdict.verdict} (${(verdict.confidence * 100).toFixed(0)}%)`);
     }
 
+    // Clean up this round's intermediate files
+    cleanTmpFiles(new RegExp(`^(master-round-${round}|critique-.*-round-${round})\\.md$`));
+
     const blockingFails = critiques.filter((c) => !c.advisory && c.verdict.verdict === "fail" && c.verdict.confidence > 0.7);
 
     if (blockingFails.length === 0) {
@@ -829,6 +847,7 @@ async function runHeadlessCouncil(
         `All sparring partners have approved your proposal. Write a card to .serf/board/backlog/ now. End with SERF_TASK_DONE.`,
         { cwd: opts.cwd, timeoutMs: 300_000, outputFile: join(serfTmp(), "master-final.md"), label: "master" },
       );
+      cleanTmpFiles(/^(master-round-|critique-|master-final|master-proposal|master-prompt|critic-prompt|prompt-).*\.md$/);
       const finalCards = listCards("backlog");
       return { ok: true, cardsWritten: finalCards.length, output: `Council converged. ${finalCards.length} card(s) on board.` };
     }
@@ -839,6 +858,7 @@ async function runHeadlessCouncil(
     proposalPrompt = `${masterPrompt}\n\nYour sparring partners reviewed your proposal:\n${feedback}\n\nRevise the proposal to address the blocking concerns. Write the updated proposal to ${proposalFile}. End with SERF_TASK_DONE.`;
   }
 
+  cleanTmpFiles(/^(master-round-|critique-|master-final|master-proposal|master-prompt|critic-prompt|prompt-).*\.md$/);
   console.log(`  → No convergence after ${maxRounds} rounds. Escalating back to master.`);
   const finalCards = listCards("backlog");
   return { ok: false, cardsWritten: finalCards.length, output: `Council did not converge after ${maxRounds} rounds.` };
