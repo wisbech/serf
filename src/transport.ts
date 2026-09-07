@@ -114,7 +114,7 @@ echo "SERF_DONE_EXIT_CODE=$?" >> "${outputFile}"
 
 export async function waitForOutputFile(
   outputFile: string,
-  _timeoutMs: number,
+  timeoutMs: number,
   doneMarker = "SERF_DONE_EXIT_CODE",
   paneId?: string,
 ): Promise<string> {
@@ -123,19 +123,30 @@ export async function waitForOutputFile(
   let lastChange = Date.now();
   const STALE_THRESHOLD_MS = 300_000;
   const CHECK_INTERVAL_MS = 10_000;
+  const startTime = Date.now();
 
   return new Promise<string>((resolve) => {
     let resolved = false;
     let watcher: any = null;
     let interval: any = null;
+    let timeout: any = null;
 
     function finish(content: string) {
       if (resolved) return;
       resolved = true;
       if (watcher) watcher.close();
       if (interval) clearInterval(interval);
+      if (timeout) clearTimeout(timeout);
       resolve(content);
     }
+
+    // Hard cap: never wait longer than the caller's timeout, even if the
+    // actor is orphaned (e.g. its worktree was removed) and can never finish.
+    timeout = setTimeout(() => {
+      if (resolved) return;
+      console.log(`  → Timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${outputFile.split("/").pop()}.`);
+      finish(existsSync(outputFile) ? readFileSync(outputFile, "utf-8") : "");
+    }, timeoutMs);
 
     function checkContent(): boolean {
       if (!existsSync(outputFile)) return false;
@@ -169,6 +180,15 @@ export async function waitForOutputFile(
       if (resolved) { clearInterval(interval); return; }
 
       if (checkContent()) {
+        clearInterval(interval);
+        return;
+      }
+
+      // If the output file's directory is gone (e.g. the worktree was removed
+      // while the actor was still running), the actor can never finish. Bail.
+      if (!existsSync(dirname(outputFile))) {
+        console.log(`  → Output directory gone (${dirname(outputFile).split("/").pop()}). Aborting wait.`);
+        finish("");
         clearInterval(interval);
         return;
       }

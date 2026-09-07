@@ -152,6 +152,35 @@ describe("waitForOutputFile", () => {
 
     rmSync(dir, { recursive: true, force: true });
   });
+
+  test("times out when the output directory is removed (orphaned actor)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "serf-wait-"));
+    const file = join(dir, "output.md");
+
+    const pending = waitForOutputFile(file, 200);
+    // Simulate the worktree being removed while the actor is still running.
+    setTimeout(() => {
+      rmSync(dir, { recursive: true, force: true });
+    }, 50);
+
+    const result = await pending;
+    expect(result).toBe("");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("times out after the hard cap when no marker ever arrives", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "serf-wait-"));
+    const file = join(dir, "output.md");
+    writeFileSync(file, "partial output, no marker");
+
+    const start = Date.now();
+    const result = await waitForOutputFile(file, 200);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(150);
+    expect(result).toContain("partial output");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe("matchesType", () => {

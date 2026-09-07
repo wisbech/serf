@@ -671,6 +671,16 @@ function removeWorktree(card: Card, merge: boolean): void {
   const worktreePath = join(serfDir, "worktrees", card.id);
   if (!existsSync(worktreePath)) return;
 
+  // Kill any process still running inside the worktree before removing it.
+  // Otherwise the actor becomes orphaned (CWD points at a deleted dir) and
+  // serf waits forever for output that can never arrive.
+  try {
+    const pids = execSync(`lsof -t +D "${worktreePath}" 2>/dev/null`, { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+    for (const pid of pids) {
+      try { process.kill(parseInt(pid, 10), "SIGKILL"); } catch {}
+    }
+  } catch {}
+
   if (merge) {
     try {
       execSync(`git add -A && git commit -m "serf: ${card.title}" --no-verify`, { cwd: worktreePath, stdio: "pipe" });
