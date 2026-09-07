@@ -15,7 +15,7 @@ import { buildMasterPrompt, buildPlanAgentPrompt, buildAgentPrompt } from "./pro
 import { getStateSummary, updateLastSession, addOpenFailure, addLesson } from "./state-file";
 import { appendFailureMode, writeTrace, createSkillFolder, getRelevantSkills } from "./skills";
 import type { Transport } from "./transport";
-import { HeadlessTransport, HerdrTransport, launchCouncil, launchInteractiveMasterConversation } from "./transport";
+import { HeadlessTransport, HerdrTransport, launchCouncil, launchInteractiveMasterConversation, launchCmd } from "./transport";
 import { qualifyModel } from "./agent-command";
 import { NoopVisibility, HerdrVisibility, type VisibilityLayer } from "./visibility";
 import { isHerdrRunning, isHerdrResponding, createWorkspace, listWorkspaces, type PaneInfo } from "./herdr-client";
@@ -118,7 +118,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
             argStr = fixedInv.args.map((a: string) => JSON.stringify(a)).join(" ");
           }
           await labelPane(herdrRootPaneId!, "master");
-          await sendCommand(herdrRootPaneId!, `cd "${process.cwd()}" && ${inv.command} ${argStr}`);
+          await sendCommand(herdrRootPaneId!, launchCmd(process.cwd(), inv.command, argStr));
           await new Promise((r) => setTimeout(r, 10_000));
           const masterPromptFile = join(getSerfDir(), "tmp", "master-prompt.md");
           writeFileSync(masterPromptFile, buildMasterPrompt(getStateSummary()));
@@ -149,7 +149,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
           argStr = fixedInv.args.map((a: string) => JSON.stringify(a)).join(" ");
         }
         await labelPane(herdrRootPaneId!, "master");
-        await sendCommand(herdrRootPaneId!, `cd "${process.cwd()}" && ${inv.command} ${argStr}`);
+        await sendCommand(herdrRootPaneId!, launchCmd(process.cwd(), inv.command, argStr));
         await new Promise((r) => setTimeout(r, 10_000));
         const masterPromptFile = join(getSerfDir(), "tmp", "master-prompt.md");
         writeFileSync(masterPromptFile, buildMasterPrompt(getStateSummary()));
@@ -839,7 +839,7 @@ async function runSkillSerf(
   const { reportAgentState } = await import("./herdr-client");
   await reportAgentState(paneId, agentName, "working", `serf: ${skillName}`).catch(() => {});
 
-  await sendCommand(paneId, `cd "${process.cwd()}" && ${invocation.command} ${argStr}`);
+  await sendCommand(paneId, launchCmd(process.cwd(), invocation.command, argStr));
   await new Promise((r) => setTimeout(r, 10_000));
   await sendCommand(paneId, `Read ${approachFile} and execute the proposed approach. Write code to .serf/knowledge/skills/${skillName}/src/ and tests alongside. Run bun test in that folder. If tests pass, write "BUILDING_BLOCK_READY" to .serf/tmp/skill-result.md. If you can't complete it, write a failure trace to .serf/tmp/skill-result.md with FAILURE_REASON. NEVER install globally.`);
 

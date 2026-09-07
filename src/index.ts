@@ -10,6 +10,7 @@ import { detectProviders, preferredProvider, defaultModelForProvider, providerIn
 import { listAgents } from "./agent-command";
 import { addTask, validateCard, listCards, moveCard } from "./board";
 import { startMaster, requestStop } from "./master";
+import { launchCmd } from "./transport";
 import { acquireLock, releaseLock, readLock } from "./lock";
 import { renderDashboard, watchDashboard } from "./watch";
 import { createRoutine, listRoutines, readRoutine, type Routine } from "./routines";
@@ -794,7 +795,7 @@ async function respawnInPane(paneId: string, role: "master" | "critic", config: 
   }
 
   await labelPane(paneId, role);
-  await sendCommand(paneId, `cd "${process.cwd()}" && ${inv.command} ${argStr}`);
+  await sendCommand(paneId, launchCmd(process.cwd(), inv.command, argStr));
   await new Promise((r) => setTimeout(r, 10_000));
 
   const promptFile = join(getSerfDir(), "tmp", `${role}-prompt.md`);

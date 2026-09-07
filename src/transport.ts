@@ -50,6 +50,14 @@ function cleanTmpFiles(pattern: RegExp): void {
   } catch {}
 }
 
+// Build a shell command that launches an agent with TMPDIR redirected to the
+// project's .serf/tmp, so agents never write scratch files to the system /tmp.
+// `argStr` is the already-joined argument string (e.g. `--model ollama/x`).
+export function launchCmd(cwd: string, command: string, argStr: string): string {
+  const tmpDir = serfTmp();
+  return `cd "${cwd}" && export TMPDIR="${tmpDir}" && ${command} ${argStr}`;
+}
+
 function buildWrapperScript(
   command: string,
   args: string[],
@@ -60,10 +68,12 @@ function buildWrapperScript(
 ): string {
   const escapedPrompt = prompt.replace(/'/g, "'\\''");
   const argStr = args.map((a) => JSON.stringify(a)).join(" ");
+  const tmpDir = serfTmp();
 
   if (promptViaStdin) {
     return `#!/bin/bash
 cd "${cwd}"
+export TMPDIR="${tmpDir}"
 ${JSON.stringify(command)} ${argStr} <<'PROMPT' 2>&1 | tee "${outputFile}"
 ${escapedPrompt}
 PROMPT
@@ -74,6 +84,7 @@ echo "SERF_DONE_EXIT_CODE=$?" >> "${outputFile}"
   const promptContent = readFileSync;
   return `#!/bin/zsh
 cd "${cwd}"
+export TMPDIR="${tmpDir}"
 ${JSON.stringify(command)} ${argStr} 2>&1 | tee "${outputFile}"
 echo "SERF_DONE_EXIT_CODE=$?" >> "${outputFile}"
 `;
@@ -92,8 +103,10 @@ function buildScriptWithInlinePrompt(
 ): string {
   const escapedPrompt = buildPromptArg(prompt);
   const argStr = args.map((a) => JSON.stringify(a)).join(" ");
+  const tmpDir = serfTmp();
   return `#!/bin/zsh
 cd "${cwd}"
+export TMPDIR="${tmpDir}"
 ${JSON.stringify(command)} ${argStr} '${escapedPrompt}' 2>&1 | tee "${outputFile}"
 echo "SERF_DONE_EXIT_CODE=$?" >> "${outputFile}"
 `;
@@ -400,7 +413,7 @@ export class HerdrTransport implements Transport {
       const fixedInv = buildInteractiveInvocation(agentName, providerModel);
       argStr = fixedInv.args.map((a) => JSON.stringify(a)).join(" ");
     }
-    await herdr.sendCommand(paneId, `cd "${opts.cwd}" && ${agentName} ${argStr}`);
+    await herdr.sendCommand(paneId, launchCmd(opts.cwd, agentName, argStr));
     await herdr.reportAgentState(paneId, agentName, "working", opts.label).catch(() => {});
 
     await new Promise((r) => setTimeout(r, 10_000));
@@ -478,8 +491,8 @@ export async function launchInteractiveMasterConversation(
     const criticPane = await herdr.splitPane(opts.workspaceId, "right", "critic");
     const criticPaneId = criticPane.pane_id;
 
-    await herdr.sendCommand(opts.rootPaneId, `cd "${opts.cwd}" && ${masterInv.command} ${masterArgStr}`);
-    await herdr.sendCommand(criticPaneId, `cd "${opts.cwd}" && ${criticInv.command} ${criticArgStr}`);
+    await herdr.sendCommand(opts.rootPaneId, launchCmd(opts.cwd, masterInv.command, masterArgStr));
+    await herdr.sendCommand(criticPaneId, launchCmd(opts.cwd, criticInv.command, criticArgStr));
 
     await new Promise((r) => setTimeout(r, 10_000));
 
@@ -695,12 +708,12 @@ export async function launchCouncil(
     }
     const promptFile = join(serfTmp(), `${p.name}-prompt.md`);
     writeFileSync(promptFile, buildPartnerPrompt(p));
-    await herdr.sendCommand(pane.pane_id, `cd "${opts.cwd}" && ${inv.command} ${argStr}`);
+    await herdr.sendCommand(pane.pane_id, launchCmd(opts.cwd, inv.command, argStr));
     await new Promise((r) => setTimeout(r, 3_000));
     await herdr.sendCommand(pane.pane_id, `Read ${promptFile} and follow those instructions. The harness will send you proposals when they are ready.`);
   }
 
-  await herdr.sendCommand(opts.rootPaneId, `cd "${opts.cwd}" && ${masterInv.command} ${masterArgStr}`);
+  await herdr.sendCommand(opts.rootPaneId, launchCmd(opts.cwd, masterInv.command, masterArgStr));
   await new Promise((r) => setTimeout(r, 10_000));
   await herdr.sendCommand(opts.rootPaneId, `Read ${masterPromptFile} and follow those instructions. When you write or update .serf/tmp/master-proposal.md, the harness will automatically notify your sparring partners. Keep running — the harness will pick up cards as you write them.`);
 

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { FakeTransport, HeadlessTransport, HerdrTransport, waitForOutputFile, matchesType, type Transport, type RunOpts } from "../src/transport";
+import { FakeTransport, HeadlessTransport, HerdrTransport, waitForOutputFile, matchesType, launchCmd, type Transport, type RunOpts } from "../src/transport";
 import { buildInvocation, listAgents, isHeadless, qualifyModel } from "../src/agent-command";
 import { writeFileSync, mkdtempSync, rmSync, utimesSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -174,5 +174,15 @@ describe("matchesType", () => {
 
   test("does not match partial word prefixes", () => {
     expect(matchesType("proposals", "proposal")).toBe(false);
+  });
+});
+
+describe("launchCmd", () => {
+  test("redirects TMPDIR to the project .serf/tmp", () => {
+    const cmd = launchCmd("/proj", "opencode", "--model ollama/x");
+    expect(cmd).toContain('cd "/proj"');
+    expect(cmd).toContain('export TMPDIR="');
+    expect(cmd).toContain("/.serf/tmp");
+    expect(cmd).toContain("opencode --model ollama/x");
   });
 });
