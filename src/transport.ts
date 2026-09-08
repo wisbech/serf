@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { writeFileSync, readFileSync, existsSync, unlinkSync, createWriteStream, watch, statSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, unlinkSync, createWriteStream, watch, statSync, readdirSync, type FSWatcher } from "node:fs";
 import { join, dirname } from "node:path";
 import { buildInvocation, buildInteractiveInvocation, qualifyModel } from "./agent-command";
 import type { SandboxProfile } from "./sandbox";
@@ -673,6 +673,49 @@ export interface CouncilOptions {
   maxRounds?: number;
 }
 
+// Route on file writes directly, so an agent only needs to write its handover
+// file (master-proposal.md, critique-<name>.md) — no manual `serf emit`
+// required to trigger the other agent. Returns the unsubscribe function.
+function watchHandoverFiles(
+  tmpDir: string,
+  proposalFile: string,
+  partners: SerfIdentity[],
+  routeToPane: (role: string, command: string) => void,
+): () => void {
+  let watcher: FSWatcher | null = null;
+  const seen = new Map<string, number>();
+  const proposalBase = proposalFile.split("/").pop();
+
+  try {
+    watcher = watch(tmpDir, (_e, filename) => {
+      if (!filename) return;
+      const now = Date.now();
+      const last = seen.get(filename) ?? 0;
+      if (now - last < 800) return;
+      seen.set(filename, now);
+
+      if (filename === proposalBase) {
+        for (const p of partners) {
+          if (p.name === "master") continue;
+          routeToPane(p.name, `Read ${proposalFile} and write your evaluation to .serf/tmp/critique-${p.name}.md. Be adversarial through your lens. When done, run: serf emit critique.written file=.serf/tmp/critique-${p.name}.md --source ${p.name}`);
+        }
+      } else if (filename.startsWith("critique-") && filename.endsWith(".md")) {
+        const partnerName = filename.slice("critique-".length, -".md".length);
+        if (partners.some((p) => p.name === partnerName)) {
+          const critiqueFile = join(tmpDir, filename);
+          routeToPane("master", `Read ${critiqueFile}. ${partnerName} has reviewed your proposal. Revise if needed (then serf emit proposal.written --source master), or write a card to .serf/board/backlog/ if you agree.`);
+        }
+      }
+    });
+  } catch {}
+
+  return () => {
+    if (watcher) {
+      try { watcher.close(); } catch {}
+    }
+  };
+}
+
 export async function launchCouncil(
   masterPrompt: string,
   opts: CouncilOptions,
@@ -769,6 +812,10 @@ export async function launchCouncil(
     }
   });
 
+  // Also route purely on file writes, so a proposal or critique file appearing
+  // triggers the handoff even if the agent did not run `serf emit`.
+  const unsubHandover = watchHandoverFiles(serfTmp(), proposalFile, partners, routeToPane);
+
   await new Promise<void>((resolve) => {
     let done = false;
     const checkAndResolve = (): boolean => {
@@ -811,6 +858,7 @@ export async function launchCouncil(
   });
 
   unsubTrajectory();
+  unsubHandover();
 
   cleanTmpFiles(/^(master-prompt|critic-prompt|critique-.*|master-proposal|prompt-).*\.md$/);
   const finalCards = listCards("backlog");
