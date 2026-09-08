@@ -19,6 +19,24 @@ export function getSerfDir(): string {
   return join(process.cwd(), ".serf");
 }
 
+// The current serf instance id. Defaults to "main"; child serfs set
+// SERF_INSTANCE to a unique name so their scratch and lock are isolated.
+export function getInstanceId(): string {
+  const id = process.env.SERF_INSTANCE;
+  if (id && id.length > 0) return id;
+  return "main";
+}
+
+// Per-instance scratch directory: .serf/tmp/<instance-id>/. Each serf instance
+// (master, critic, actor, child serfs) owns its own slice, so concurrent
+// instances never collide on prompt/proposal/critique files. The board is
+// shared (it lives at .serf/board/), but scratch is isolated.
+export function getInstanceTmp(): string {
+  const dir = join(getSerfDir(), "tmp", getInstanceId());
+  ensureDir(dir);
+  return dir;
+}
+
 export function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }

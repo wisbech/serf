@@ -7,7 +7,7 @@ import { allocateModel } from "./allocator";
 import { startScheduler } from "./scheduler";
 import { moveCard, writeCard, listCards, addTask, computeFrontier, unblockDependents, type Card } from "./board";
 import { appendEvent } from "./events";
-import { getSerfDir, ensureDir } from "./paths";
+import { getSerfDir, ensureDir, getInstanceTmp } from "./paths";
 import { loadConfig } from "./state";
 import { createCardBudget, trackPhaseUsage, isPhaseOverBudget, formatBudget, getTotalUsage, type CardBudget } from "./budget";
 import { createPrdStub, prdExists, syncDecisionsToCard, syncVerificationToCard } from "./prd";
@@ -123,7 +123,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
           await labelPane(herdrRootPaneId!, "master");
           await sendCommand(herdrRootPaneId!, launchCmd(process.cwd(), inv.command, argStr));
           await new Promise((r) => setTimeout(r, 10_000));
-          const masterPromptFile = join(getSerfDir(), "tmp", "master-prompt.md");
+          const masterPromptFile = join(getInstanceTmp(), "master-prompt.md");
           writeFileSync(masterPromptFile, buildMasterPrompt(getStateSummary()));
           await sendCommand(herdrRootPaneId!, `Read ${masterPromptFile} and follow those instructions.`);
           console.log(`  ✓ Master launched.`);
@@ -154,7 +154,7 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
         await labelPane(herdrRootPaneId!, "master");
         await sendCommand(herdrRootPaneId!, launchCmd(process.cwd(), inv.command, argStr));
         await new Promise((r) => setTimeout(r, 10_000));
-        const masterPromptFile = join(getSerfDir(), "tmp", "master-prompt.md");
+        const masterPromptFile = join(getInstanceTmp(), "master-prompt.md");
         writeFileSync(masterPromptFile, buildMasterPrompt(getStateSummary()));
         await sendCommand(herdrRootPaneId!, `Read ${masterPromptFile} and follow those instructions.`);
         console.log(`  ✓ Master launched.`);
@@ -655,12 +655,12 @@ function ensureSeeded(): void {
 }
 
 function cleanTmp(): void {
-  const tmpDir = join(getSerfDir(), "tmp");
+  // Clean only this instance's scratch dir, not the shared tmp root (which
+  // holds other instances' dirs and the scheduler state).
+  const tmpDir = getInstanceTmp();
   if (!existsSync(tmpDir)) return;
-  const preserve = new Set(["serf.pid", "scheduler-state.json"]);
   try {
     for (const f of readdirSync(tmpDir)) {
-      if (preserve.has(f)) continue;
       try { unlinkSync(join(tmpDir, f)); } catch {}
     }
   } catch {}

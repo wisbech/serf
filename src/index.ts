@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { getSerfDir } from "./paths";
+import { getSerfDir, getInstanceTmp } from "./paths";
 import { loadConfig, saveConfig, type Config } from "./state";
 import { detectCapabilities, defaultAgentFromCapabilities, printCapabilities } from "./capabilities";
 import { detectProviders, preferredProvider, defaultModelForProvider, providerInstructions } from "./providers";
@@ -864,7 +864,7 @@ async function respawnInPane(paneId: string, role: "master" | "critic", config: 
   await sendCommand(paneId, launchCmd(process.cwd(), inv.command, argStr));
   await new Promise((r) => setTimeout(r, 10_000));
 
-  const promptFile = join(getSerfDir(), "tmp", `${role}-prompt.md`);
+  const promptFile = join(getInstanceTmp(), `${role}-prompt.md`);
   const { buildMasterPrompt, buildCriticConversationPrompt } = await import("./prompts");
   const { getStateSummary } = await import("./state-file");
   const prompt = isMaster

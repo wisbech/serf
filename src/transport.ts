@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { buildInvocation, buildInteractiveInvocation, qualifyModel } from "./agent-command";
 import type { SandboxProfile } from "./sandbox";
 import { loadConfig } from "./state";
-import { getSerfDir, ensureDir } from "./paths";
+import { getSerfDir, ensureDir, getInstanceTmp } from "./paths";
 import * as herdr from "./herdr-client";
 import { listSerfs, type SerfIdentity } from "./serf";
 import { buildPartnerPrompt } from "./prompts";
@@ -34,9 +34,7 @@ function estimateTokens(text: string): number {
 }
 
 function serfTmp(): string {
-  const dir = join(getSerfDir(), "tmp");
-  ensureDir(dir);
-  return dir;
+  return getInstanceTmp();
 }
 
 function cleanTmpFiles(pattern: RegExp): void {

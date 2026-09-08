@@ -1,9 +1,12 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { getSerfDir, ensureDir } from "./paths";
+import { getSerfDir, ensureDir, getInstanceId } from "./paths";
 
 function lockPath(): string {
-  return join(getSerfDir(), "tmp", "serf.pid");
+  // Per-instance lock: .serf/tmp/<instance-id>.pid. Each serf instance owns
+  // its own lock, so multiple serfs (master + child serfs) can run concurrently
+  // in the same project without blocking each other.
+  return join(getSerfDir(), "tmp", `${getInstanceId()}.pid`);
 }
 
 function pidAlive(pid: number): boolean {
