@@ -50,6 +50,7 @@ const spawnedSerfs = new Map<string, SpawnedSerf>();
 export interface MasterOptions {
   budgetLimit?: number;
   model?: string;
+  agent?: string;
   once?: boolean;
   skipMaster?: boolean;
   transport?: "herdr" | "headless";
@@ -69,6 +70,8 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
   });
 
   const config = loadConfig();
+  if (options.agent) config.agent = options.agent;
+  if (options.model) config.model = options.model;
   const transportOverride = options.transport;
   let useHerdr = transportOverride
     ? transportOverride === "herdr"

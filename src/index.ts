@@ -289,35 +289,101 @@ async function handleBoard(args: string[]): Promise<void> {
 async function handleStart(args: string[]): Promise<void> {
   const budgetFlag = args.indexOf("--budget");
   const budgetLimit = budgetFlag >= 0 ? parseInt(args[budgetFlag + 1], 10) : undefined;
-  const modelFlag = args.indexOf("--model");
-  const model = modelFlag >= 0 ? args[modelFlag + 1] : undefined;
-  const agentFlag = args.indexOf("--agent");
   const onceFlag = args.includes("--once");
   const forceFlag = args.includes("--force");
-  const herdrFlag = args.includes("--herdr");
-  const headlessFlag = args.includes("--headless");
 
-  if (agentFlag >= 0) {
-    const config = loadConfig();
-    config.agent = args[agentFlag + 1];
-    saveConfig(config);
-  }
-
+  const config = loadConfig();
+  let agent = config.agent;
+  let model = config.model;
   let transport: "herdr" | "headless" | undefined;
-  if (herdrFlag) transport = "herdr";
-  else if (headlessFlag) transport = "headless";
-  else if (!onceFlag && process.stdin.isTTY) {
+
+  const launch = await chooseLaunchConfig(args, onceFlag);
+  if (launch.transport) transport = launch.transport;
+  if (launch.agent) agent = launch.agent;
+  if (launch.model) model = launch.model;
+
+  // Persist an explicitly forced --agent / --model to config for future starts.
+  const hasAgentFlag = args.indexOf("--agent") >= 0;
+  const hasModelFlag = args.indexOf("--model") >= 0;
+  if (hasAgentFlag) config.agent = agent;
+  if (hasModelFlag) config.model = model;
+  if (hasAgentFlag || hasModelFlag) saveConfig(config);
+
+  if (!acquireRunLock(forceFlag)) return;
+
+  await startMaster({ budgetLimit, model, agent, once: onceFlag, transport });
+  releaseLock();
+}
+
+async function chooseLaunchConfig(
+  args: string[],
+  onceFlag: boolean,
+): Promise<{ transport?: "herdr" | "headless"; agent?: string; model?: string }> {
+  const interactive = !onceFlag && process.stdin.isTTY;
+  const config = loadConfig();
+
+  const agentFlag = args.indexOf("--agent");
+  const modelFlag = args.indexOf("--model");
+  const forcedAgent = agentFlag >= 0 ? args[agentFlag + 1] : undefined;
+  const forcedModel = modelFlag >= 0 ? args[modelFlag + 1] : undefined;
+
+  let out: { transport?: "herdr" | "headless"; agent?: string; model?: string } = {};
+
+  // Transport
+  if (args.includes("--herdr")) out.transport = "herdr";
+  else if (args.includes("--headless")) out.transport = "headless";
+  else if (interactive) {
     const herdrAvailable = isHerdrRunning() && (await isHerdrResponding());
-    transport = await choose<"herdr" | "headless">("How should serf run?", [
+    out.transport = await choose<"herdr" | "headless">("How should serf run?", [
       { label: "herdr (panes)", value: "herdr", hint: herdrAvailable ? "visible master + partners in herdr" : "⚠ herdr not running — will fall back" },
       { label: "headless", value: "headless", hint: "no panes, runs in the background" },
     ]);
   }
 
-  if (!acquireRunLock(forceFlag)) return;
+  // Agent
+  if (forcedAgent) {
+    out.agent = forcedAgent;
+  } else if (interactive) {
+    const agents = listAgents();
+    const current = config.agent ?? "claude";
+    out.agent = await choose("Which coding agent?", [
+      { label: `default: ${current}`, value: current, hint: "from .serf/config.json" },
+      ...agents.filter((a) => a !== current).map((a) => ({ label: a, value: a })),
+    ]);
+  }
 
-  await startMaster({ budgetLimit, model, once: onceFlag, transport });
-  releaseLock();
+  // Model
+  if (forcedModel) {
+    out.model = forcedModel;
+  } else if (interactive) {
+    out.model = await chooseModel();
+  }
+
+  return out;
+}
+
+async function chooseModel(): Promise<string> {
+  const config = loadConfig();
+  const current = config.model ?? "claude-sonnet-4-20250514";
+  const models = await detectLocalModels();
+  const choices: { label: string; value: string; hint?: string }[] = [
+    { label: `default: ${current}`, value: current, hint: "from .serf/config.json" },
+  ];
+  for (const m of models) {
+    if (m === current) continue;
+    choices.push({ label: m, value: m });
+  }
+  return choose("Which model?", choices);
+}
+
+async function detectLocalModels(): Promise<string[]> {
+  try {
+    const providers = await detectProviders();
+    const ollama = providers.find((p) => p.name === "ollama");
+    return ollama?.models ?? [];
+  } catch {
+    return [];
+  }
 }
 
 // ── PROCESS (headless — no master interactive launch) ──
@@ -1165,7 +1231,7 @@ USAGE:
   serf init                          Create .serf/ in current project
   serf task "do something"           Add a task to the board
   serf start [--once] [--budget N]   Launch master agent — surveys project, processes tasks
-  serf start [--herdr|--headless]    Choose transport explicitly (else arrow-key prompt)
+  serf start [--herdr|--headless]    Choose transport, agent, and model (else arrow-key prompts)
   serf process [--once] [--budget N]  Same as start (headless board loop)
   serf board                         Show the kanban board
   serf board move <id> <column>      Move a card between columns
