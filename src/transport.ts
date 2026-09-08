@@ -17,12 +17,18 @@ export interface RunOpts {
   profile?: SandboxProfile;
   label?: string;
   model?: string;
+  // Turn-based budget: max consecutive no-progress checks before the agent is
+  // considered stuck. A "turn" is one observable output growth. Defaults to a
+  // generous wall-clock fallback if unset.
+  maxStallTurns?: number;
 }
 
 export interface ActorRunResult {
   output: string;
   tokensUsed: number;
   ok: boolean;
+  // How many progress turns (output growths) occurred before completion.
+  turnsUsed?: number;
 }
 
 export interface Transport {
@@ -115,15 +121,19 @@ export async function waitForOutputFile(
   timeoutMs: number,
   doneMarker = "SERF_DONE_EXIT_CODE",
   paneId?: string,
-): Promise<string> {
+  maxStallTurns?: number,
+): Promise<{ content: string; turnsUsed: number }> {
   const markers = [doneMarker, "SERF_TASK_DONE", "SERF_DONE_EXIT_CODE"];
   let lastSize = 0;
   let lastChange = Date.now();
+  let turnsUsed = 0;
+  let stallTurns = 0;
   const STALE_THRESHOLD_MS = 300_000;
   const CHECK_INTERVAL_MS = 10_000;
   const startTime = Date.now();
+  const stallLimit = maxStallTurns ?? 6; // 6 consecutive no-progress checks = stuck
 
-  return new Promise<string>((resolve) => {
+  return new Promise<{ content: string; turnsUsed: number }>((resolve) => {
     let resolved = false;
     let watcher: any = null;
     let interval: any = null;
@@ -135,7 +145,7 @@ export async function waitForOutputFile(
       if (watcher) watcher.close();
       if (interval) clearInterval(interval);
       if (timeout) clearTimeout(timeout);
-      resolve(content);
+      resolve({ content, turnsUsed });
     }
 
     // Hard cap: never wait longer than the caller's timeout, even if the
@@ -156,6 +166,8 @@ export async function waitForOutputFile(
       if (content.length !== lastSize) {
         lastSize = content.length;
         lastChange = Date.now();
+        turnsUsed += 1;
+        stallTurns = 0;
       }
       return false;
     }
@@ -187,6 +199,18 @@ export async function waitForOutputFile(
       if (!existsSync(dirname(outputFile))) {
         console.log(`  → Output directory gone (${dirname(outputFile).split("/").pop()}). Aborting wait.`);
         finish("");
+        clearInterval(interval);
+        return;
+      }
+
+      // Turn-based stall detection: if the agent produced no new output for
+      // `stallLimit` consecutive checks, it's stuck — not thinking. This is the
+      // adaptive budget: a slow model that keeps writing output is never killed,
+      // but a stuck agent is caught quickly.
+      stallTurns += 1;
+      if (stallTurns >= stallLimit) {
+        console.log(`  → Agent stalled (no output for ${stallTurns} turns). Aborting wait.`);
+        finish(existsSync(outputFile) ? readFileSync(outputFile, "utf-8") : "");
         clearInterval(interval);
         return;
       }
@@ -373,13 +397,13 @@ export class HeadlessTransport implements Transport {
       return { output: "", tokensUsed: 0, ok: false };
     }
 
-    const raw = await waitForOutputFile(opts.outputFile, opts.timeoutMs);
+    const { content, turnsUsed } = await waitForOutputFile(opts.outputFile, opts.timeoutMs, "SERF_DONE_EXIT_CODE", undefined, opts.maxStallTurns);
 
     try { unlinkSync(scriptPath); } catch {}
     try { unlinkSync(`${scriptPath}.log`); } catch {}
 
-    const { output, ok } = parseOutput(raw);
-    return { output, tokensUsed: estimateTokens(output), ok };
+    const { output, ok } = parseOutput(content);
+    return { output, tokensUsed: estimateTokens(output), ok, turnsUsed };
   }
 }
 

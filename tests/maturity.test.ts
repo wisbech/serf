@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { clusterTasks, promotionSuggestions, promoteToRoutine } from "../src/maturity";
+import { clusterTasks, promotionSuggestions, promoteToRoutine, p90TurnsForTask } from "../src/maturity";
 import { recordOutcome } from "../src/track-record";
 import { routineExists } from "../src/routines";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -87,5 +87,19 @@ describe("Maturity ladder", () => {
     const novel = promoteToRoutine("fix auth bug");
     expect(novel.reason).toContain("not [repetitive]");
     expect(routineExists("fix-auth-bug")).toBe(false);
+  });
+
+  test("p90TurnsForTask returns undefined with no data", () => {
+    expect(p90TurnsForTask("reconcile invoices")).toBeUndefined();
+  });
+
+  test("p90TurnsForTask returns p90 of similar successful runs", () => {
+    recordOutcome({ cardId: "a", title: "reconcile invoices", model: "m", agent: "a", outcome: "pass", attempts: 1, failedCriteria: [], turnsUsed: 2, ts: "1" });
+    recordOutcome({ cardId: "b", title: "reconcile invoices", model: "m", agent: "a", outcome: "pass", attempts: 1, failedCriteria: [], turnsUsed: 4, ts: "2" });
+    recordOutcome({ cardId: "c", title: "reconcile invoices", model: "m", agent: "a", outcome: "pass", attempts: 1, failedCriteria: [], turnsUsed: 6, ts: "3" });
+    recordOutcome({ cardId: "d", title: "reconcile invoices", model: "m", agent: "a", outcome: "pass", attempts: 1, failedCriteria: [], turnsUsed: 8, ts: "4" });
+    recordOutcome({ cardId: "e", title: "reconcile invoices", model: "m", agent: "a", outcome: "pass", attempts: 1, failedCriteria: [], turnsUsed: 10, ts: "5" });
+    // p90 of [2,4,6,8,10] = index 4 → 10
+    expect(p90TurnsForTask("reconcile invoices")).toBe(10);
   });
 });

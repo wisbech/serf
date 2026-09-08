@@ -100,6 +100,25 @@ export function promoteToRoutine(label: string): { routine?: string; reason?: st
   return { routine: name };
 }
 
+// Adaptive turn budget: return the p90 of turnsUsed for past successful runs
+// of similar tasks, so the harness times itself against its own history rather
+// than a fixed constant. Returns undefined if there's not enough data.
+export function p90TurnsForTask(title: string): number | undefined {
+  const records = readTrackRecords().filter((r) => r.outcome === "pass" && r.turnsUsed !== undefined);
+  if (records.length === 0) return undefined;
+
+  const words = title.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+  const similar = records.filter((r) => {
+    const rWords = r.title.toLowerCase().split(/\s+/);
+    return words.some((w) => rWords.some((rw) => rw.includes(w) || w.includes(rw)));
+  });
+  if (similar.length < 2) return undefined;
+
+  const turns = similar.map((r) => r.turnsUsed!).sort((a, b) => a - b);
+  const idx = Math.min(turns.length - 1, Math.floor(turns.length * 0.9));
+  return turns[idx];
+}
+
 export function renderMaturity(): string {
   const clusters = clusterTasks(readTrackRecords());
   const suggestions = promotionSuggestions();

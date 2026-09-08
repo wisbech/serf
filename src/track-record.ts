@@ -11,6 +11,7 @@ export interface TrackRecord {
   attempts: number;
   failedCriteria: string[];
   routine?: string;
+  turnsUsed?: number;
   ts: string;
 }
 

@@ -37,6 +37,7 @@ export interface Config {
   selfCorrectTurns?: number;
   maxRounds?: number;
   modelTiers?: Record<string, string>;
+  maxStallTurns?: number;
 }
 
 function findConfigPath(): string | null {

@@ -4,6 +4,7 @@ import { parseVerification, isVerificationGreen, formatVerificationFeedback } fr
 import { matchRoutine, buildRoutinePrompt, readRoutine } from "./routines";
 import { recordOutcome } from "./track-record";
 import { allocateModel } from "./allocator";
+import { p90TurnsForTask } from "./maturity";
 import { startScheduler } from "./scheduler";
 import { moveCard, writeCard, listCards, addTask, computeFrontier, unblockDependents, type Card } from "./board";
 import { appendEvent } from "./events";
@@ -478,9 +479,12 @@ async function executeWithCritique(
 
   const config = loadConfig();
   const selfCorrectTurns = config?.selfCorrectTurns ?? 3;
+  const maxStallTurns = config?.maxStallTurns ?? 6;
+  const adaptiveStallTurns = p90TurnsForTask(card.title) ?? maxStallTurns;
   let previousFeedback = "";
   let lastFailedCriteria: string[] = [];
   let lastActorModel = config?.model ?? "unknown";
+  let lastTurnsUsed: number | undefined;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     console.log(`    → Attempt ${attempt}: actor working...`);
@@ -494,7 +498,9 @@ async function executeWithCritique(
       outputFile: outputPath,
       label: `actor: ${card.title.slice(0, 30)}`,
       model: actorModel,
+      maxStallTurns: adaptiveStallTurns,
     });
+    lastTurnsUsed = runResult.turnsUsed;
     trackPhaseUsage(cbudget, "execution", runResult.tokensUsed);
 
     if (!runResult.ok || isPhaseOverBudget(cbudget, "execution")) {
@@ -526,6 +532,7 @@ async function executeWithCritique(
         outputFile: outputPath,
         label: `actor: ${card.title.slice(0, 30)} (fix ${turn})`,
         model: actorModel,
+        maxStallTurns: adaptiveStallTurns,
       });
       trackPhaseUsage(cbudget, "execution", runResult.tokensUsed);
       if (!runResult.ok) break;
@@ -575,6 +582,7 @@ async function executeWithCritique(
         attempts: attempt,
         failedCriteria: [],
         routine: routine?.name,
+        turnsUsed: lastTurnsUsed,
         ts: new Date().toISOString(),
       });
       return "done";
@@ -609,6 +617,7 @@ async function executeWithCritique(
     attempts: MAX_RETRIES,
     failedCriteria: lastFailedCriteria,
     routine: routine?.name,
+    turnsUsed: lastTurnsUsed,
     ts: new Date().toISOString(),
   });
   const skillName = card.title.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 2).slice(0, 3).join("-");

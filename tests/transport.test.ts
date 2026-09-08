@@ -133,7 +133,7 @@ describe("waitForOutputFile", () => {
     writeFileSync(file, "some output\nSERF_DONE_EXIT_CODE=0\n");
 
     const result = await waitForOutputFile(file, 1000);
-    expect(result).toContain("SERF_DONE_EXIT_CODE=0");
+    expect(result.content).toContain("SERF_DONE_EXIT_CODE=0");
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -148,7 +148,7 @@ describe("waitForOutputFile", () => {
     }, 50);
 
     const result = await pending;
-    expect(result).toContain("SERF_TASK_DONE");
+    expect(result.content).toContain("SERF_TASK_DONE");
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -164,7 +164,7 @@ describe("waitForOutputFile", () => {
     }, 50);
 
     const result = await pending;
-    expect(result).toBe("");
+    expect(result.content).toBe("");
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -177,7 +177,24 @@ describe("waitForOutputFile", () => {
     const start = Date.now();
     const result = await waitForOutputFile(file, 200);
     expect(Date.now() - start).toBeGreaterThanOrEqual(150);
-    expect(result).toContain("partial output");
+    expect(result.content).toContain("partial output");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("counts turns and detects a stall", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "serf-wait-"));
+    const file = join(dir, "output.md");
+
+    const pending = waitForOutputFile(file, 5000, "SERF_DONE_EXIT_CODE", undefined, 2);
+    // Write once (turn 1), then stall (no more writes) → stall after 2 checks.
+    setTimeout(() => {
+      writeFileSync(file, "first chunk\n");
+    }, 30);
+
+    const result = await pending;
+    expect(result.turnsUsed).toBeGreaterThanOrEqual(1);
+    expect(result.content).toContain("first chunk");
 
     rmSync(dir, { recursive: true, force: true });
   });
