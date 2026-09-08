@@ -54,6 +54,7 @@ export interface MasterOptions {
   once?: boolean;
   skipMaster?: boolean;
   transport?: "herdr" | "headless";
+  forceRelaunch?: boolean;
 }
 
 function estimateTokens(text: string): number {
@@ -109,8 +110,8 @@ export async function startMaster(options: MasterOptions = {}): Promise<void> {
         const { isAgentAlive, sendCommand, labelPane } = await import("./herdr-client");
         const { buildInteractiveInvocation: buildInv } = await import("./agent-command");
         const masterAlive = await isAgentAlive(herdrRootPaneId!);
-        if (!masterAlive) {
-          console.log(`  → Master pane is dead. Launching ${config?.masterAgent ?? config?.agent ?? "claude"}...`);
+        if (!masterAlive || options.forceRelaunch) {
+          console.log(`  → ${masterAlive ? "Relaunching" : "Master pane is dead. Launching"} ${config?.masterAgent ?? config?.agent ?? "claude"}...`);
           const masterAgent = config?.masterAgent ?? config?.agent ?? "claude";
           const masterModel = config?.masterModel ?? config?.model;
           const inv = buildInv(masterAgent, masterModel);

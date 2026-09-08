@@ -853,6 +853,16 @@ export async function launchCouncil(
         resolve();
       }
     }, 60_000);
+
+    // Hard cap: never hang the council forever. If no card appears and the
+    // agents don't exit within 15 minutes, bail so serf can move on.
+    const hardTimeout = setTimeout(() => {
+      if (done) return;
+      console.log(`  → Council timed out after 15m. Moving on.`);
+      done = true;
+      clearInterval(exitInterval);
+      resolve();
+    }, 15 * 60_000);
   });
 
   unsubTrajectory();

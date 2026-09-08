@@ -302,16 +302,21 @@ async function handleStart(args: string[]): Promise<void> {
   if (launch.agent) agent = launch.agent;
   if (launch.model) model = launch.model;
 
-  // Persist an explicitly forced --agent / --model to config for future starts.
-  const hasAgentFlag = args.indexOf("--agent") >= 0;
-  const hasModelFlag = args.indexOf("--model") >= 0;
-  if (hasAgentFlag) config.agent = agent;
-  if (hasModelFlag) config.model = model;
-  if (hasAgentFlag || hasModelFlag) saveConfig(config);
+  // Persist the chosen agent/model to config so future starts remember them.
+  // Covers both explicit --agent/--model flags and the interactive picker.
+  const changedAgent = launch.agent !== undefined && launch.agent !== config.agent;
+  const changedModel = launch.model !== undefined && launch.model !== config.model;
+  if (changedAgent) config.agent = agent;
+  if (changedModel) config.model = model;
+  if (changedAgent || changedModel) saveConfig(config);
+
+  // If the user explicitly picked a different agent/model, force a master
+  // relaunch so the new choice actually takes effect (not just the old pane).
+  const forceRelaunch = changedAgent || changedModel;
 
   if (!acquireRunLock(forceFlag)) return;
 
-  await startMaster({ budgetLimit, model, agent, once: onceFlag, transport });
+  await startMaster({ budgetLimit, model, agent, once: onceFlag, transport, forceRelaunch });
   releaseLock();
 }
 
