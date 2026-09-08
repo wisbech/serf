@@ -1229,23 +1229,36 @@ function handleMaturity(args: string[]): void {
 // ── PRICES ──
 
 function handlePrices(args: string[]): void {
-  const { DEFAULT_PRICES, modelIsLocal } = require("./pricing");
-  const names = Object.keys(DEFAULT_PRICES).sort();
+  const { getPrices, modelIsLocal, seedPriceFile } = require("./pricing");
+  const seedFlag = args.includes("--seed");
+
+  if (seedFlag) {
+    const path = seedPriceFile();
+    console.log(`\n  ✓ Price table written to ${path}`);
+    console.log("    Edit prices or add models there; .serf/pricing.json overrides the bundled file.\n");
+    return;
+  }
+
+  const prices = getPrices();
+  const names = Object.keys(prices).sort();
   const onlyLocal = args.includes("--local");
   const onlyCloud = args.includes("--cloud");
   console.log("\n  ═══ MODEL PRICING ($ / M tokens) ═══════════════════");
-  console.log("  Prices from ollama.com/pricing (cloud). Local models cost $0\n");
+  console.log("  Loaded from resources/model-prices.json (or .serf/pricing.json)\n");
+  if (names.length === 0) {
+    console.log("  (no prices loaded — run `serf prices --seed` to create an editable table)\n");
+  }
   for (const name of names) {
     const local = modelIsLocal(name);
     if (onlyLocal && !local) continue;
     if (onlyCloud && local) continue;
-    const p = DEFAULT_PRICES[name];
+    const p = prices[name];
     const marker = local ? "·" : "●";
     console.log(`  ${marker} ${name.padEnd(28)} in $${p.inputPerM.toFixed(3)}  out $${p.outputPerM.toFixed(3)}`);
   }
   console.log("");
-  console.log("  Set your spend cap:  serf config set maxSpendPerHarvest <usd>");
-  console.log("  Override a price:    serf config set modelCosts.<model>.inputPerM <usd>\n");
+  console.log("  Seed an editable table: serf prices --seed");
+  console.log("  Set your spend cap:    serf config set maxSpendPerHarvest <usd>\n");
 }
 
 // ── HELP ──
