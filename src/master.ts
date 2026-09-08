@@ -65,13 +65,11 @@ function estimateTokens(text: string): number {
 export async function startMaster(options: MasterOptions = {}): Promise<void> {
   ensureSeeded();
 
+  const config = loadConfig();
   const budget = new BudgetTracker({
     maxTokensPerHarvest: options.budgetLimit ?? 100_000,
-    costPerToken: 0.00001,
-    maxSpendPerHarvest: 5.0,
+    maxSpendPerHarvest: config?.maxSpendPerHarvest ?? 5.0,
   });
-
-  const config = loadConfig();
   if (options.agent) config.agent = options.agent;
   if (options.model) config.model = options.model;
   const transportOverride = options.transport;

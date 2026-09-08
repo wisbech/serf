@@ -62,6 +62,7 @@ async function main() {
     case "routine":  handleRoutine(args); return;
     case "serf":     handleSerf(args); return;
     case "maturity": handleMaturity(args); return;
+    case "prices":   handlePrices(args); return;
     case "help":
     case "--help":
     case "-h":       printHelp(); return;
@@ -1223,6 +1224,28 @@ function handleMaturity(args: string[]): void {
   }
   console.log("\n" + renderMaturity() + "\n");
   console.log("  Promote a repetitive task to a routine: serf maturity --promote \"<task label>\"\n");
+}
+
+// ── PRICES ──
+
+function handlePrices(args: string[]): void {
+  const { DEFAULT_PRICES, modelIsLocal } = require("./pricing");
+  const names = Object.keys(DEFAULT_PRICES).sort();
+  const onlyLocal = args.includes("--local");
+  const onlyCloud = args.includes("--cloud");
+  console.log("\n  ═══ MODEL PRICING ($ / M tokens) ═══════════════════");
+  console.log("  Prices from ollama.com/pricing (cloud). Local models cost $0\n");
+  for (const name of names) {
+    const local = modelIsLocal(name);
+    if (onlyLocal && !local) continue;
+    if (onlyCloud && local) continue;
+    const p = DEFAULT_PRICES[name];
+    const marker = local ? "·" : "●";
+    console.log(`  ${marker} ${name.padEnd(28)} in $${p.inputPerM.toFixed(3)}  out $${p.outputPerM.toFixed(3)}`);
+  }
+  console.log("");
+  console.log("  Set your spend cap:  serf config set maxSpendPerHarvest <usd>");
+  console.log("  Override a price:    serf config set modelCosts.<model>.inputPerM <usd>\n");
 }
 
 // ── HELP ──

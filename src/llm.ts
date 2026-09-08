@@ -1,15 +1,14 @@
 import { loadConfig } from "./state";
+import { modelPrice, costForTokens } from "./pricing";
 
 export interface BudgetConfig {
   maxTokensPerHarvest: number;
-  costPerToken: number;
   maxSpendPerHarvest: number;
   maxMemoryMB?: number;
 }
 
 export const DEFAULT_BUDGET_CONFIG: BudgetConfig = {
   maxTokensPerHarvest: 100_000,
-  costPerToken: 0.00001,
   maxSpendPerHarvest: 5.0,
   maxMemoryMB: 0,
 };
@@ -21,9 +20,12 @@ export class BudgetTracker {
 
   constructor(private config: BudgetConfig = DEFAULT_BUDGET_CONFIG) {}
 
-  track(tokens: number) {
+  // Track a call's cost in dollars for a specific model. Uses the real price
+  // table (local models cost $0) so the budget reflects actual spend, not a
+  // flat cost-per-token guess.
+  track(tokens: number, costDollars: number = 0) {
     this.tokensUsed += tokens;
-    this.totalCost += tokens * this.config.costPerToken;
+    this.totalCost += costDollars;
   }
 
   trackMemory(rssMB: number) {
@@ -98,9 +100,11 @@ export async function callLLM(prompt: string, options: CallLLMOptions = {}): Pro
 
   const promptTokens = estimateTokens(prompt);
   let tokensUsed = promptTokens;
+  const price = modelPrice(model, config);
 
   if (options.budgetTracker) {
-    options.budgetTracker.track(promptTokens);
+    const inputCost = costForTokens(price, promptTokens, "input");
+    options.budgetTracker.track(promptTokens, inputCost);
     if (options.budgetTracker.isOverBudget()) {
       return { text: "[BUDGET_EXCEEDED]", tokensUsed, warnings: ["budget-exceeded"], ok: false };
     }
@@ -145,7 +149,8 @@ export async function callLLM(prompt: string, options: CallLLMOptions = {}): Pro
   tokensUsed += responseTokens;
 
   if (options.budgetTracker) {
-    options.budgetTracker.track(responseTokens);
+    const outputCost = costForTokens(price, responseTokens, "output");
+    options.budgetTracker.track(responseTokens, outputCost);
     if (options.budgetTracker.isOverBudget()) warnings.push("budget-exceeded");
   }
 

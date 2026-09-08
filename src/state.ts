@@ -38,6 +38,8 @@ export interface Config {
   maxRounds?: number;
   modelTiers?: Record<string, string>;
   maxStallTurns?: number;
+  maxSpendPerHarvest?: number;
+  modelCosts?: Record<string, { inputPerM: number; outputPerM: number; source?: string }>;
 }
 
 function findConfigPath(): string | null {
