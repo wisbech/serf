@@ -186,8 +186,9 @@ describe("waitForOutputFile", () => {
     const dir = mkdtempSync(join(tmpdir(), "serf-wait-"));
     const file = join(dir, "output.md");
 
-    const pending = waitForOutputFile(file, 5000, "SERF_DONE_EXIT_CODE", undefined, 2);
-    // Write once (turn 1), then stall (no more writes) → stall after 2 checks.
+    // Fast check interval (50ms) so the stall detector (2 checks) wins quickly.
+    // Write once (turn 1), then stall → stall after 2 checks.
+    const pending = waitForOutputFile(file, 5000, "SERF_DONE_EXIT_CODE", undefined, 2, 50);
     setTimeout(() => {
       writeFileSync(file, "first chunk\n");
     }, 30);

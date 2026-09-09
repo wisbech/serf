@@ -655,6 +655,7 @@ function ensureSeeded(): void {
     "events", "worktrees", "tmp", "trajectories",
     "workspaces/actor/.serf", "workspaces/critic/.serf", "workspaces/critic/.serf/verdicts",
     "routines", "knowledge/track-record",
+    "data", "data/credentials",
   ]) {
     ensureDir(join(serfDir, dir));
   }

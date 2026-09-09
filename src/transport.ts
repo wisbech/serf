@@ -122,6 +122,7 @@ export async function waitForOutputFile(
   doneMarker = "SERF_DONE_EXIT_CODE",
   paneId?: string,
   maxStallTurns?: number,
+  checkIntervalMs = 10_000,
 ): Promise<{ content: string; turnsUsed: number }> {
   const markers = [doneMarker, "SERF_TASK_DONE", "SERF_DONE_EXIT_CODE"];
   let lastSize = 0;
@@ -129,7 +130,7 @@ export async function waitForOutputFile(
   let turnsUsed = 0;
   let stallTurns = 0;
   const STALE_THRESHOLD_MS = 300_000;
-  const CHECK_INTERVAL_MS = 10_000;
+  const CHECK_INTERVAL_MS = checkIntervalMs;
   const startTime = Date.now();
   const stallLimit = maxStallTurns ?? 6; // 6 consecutive no-progress checks = stuck
 

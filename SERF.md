@@ -20,15 +20,22 @@
 │   ├── review/       # awaiting human review
 │   └── done/         # completed tasks
 ├── serfs/            # identities (actor.md, critic.md, custom)
-├── knowledge/
-│   ├── skills/       # what works (accumulated)
-│   ├── patterns/     # recurring solutions
-│   ├── failures/     # what didn't work
-│   └── references/   # source material
+├── knowledge/        # DURABLE — what we've learned (accumulates)
+│   ├── skills/       #   what works
+│   ├── patterns/     #   recurring solutions
+│   ├── failures/     #   what didn't work
+│   └── references/   #   source material
+├── data/             # CONTEMPORARY — what we have access to (the garden)
+│   ├── pricing.json  #   refreshed model prices
+│   ├── credentials/  #   credential helpers (tokens stay in memory)
+│   └── state.json    #   freshness/staleness of each resource
 ├── workspaces/       # per-agent private state
 ├── worktrees/        # per-task git worktrees (best-effort)
 └── events/           # *.jsonl append-only audit trail
 ```
+
+The environment is split in two: `knowledge/` holds what serf has **learned** (durable, accumulates), `data/` holds what serf has **access to right now** (contemporary, expires). `serf garden` shows what's stale; `serf garden --prune` tidies it.
+
 
 ---
 

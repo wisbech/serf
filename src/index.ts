@@ -63,6 +63,7 @@ async function main() {
     case "serf":     handleSerf(args); return;
     case "maturity": handleMaturity(args); return;
     case "prices":   handlePrices(args); return;
+    case "garden":   handleGarden(args); return;
     case "help":
     case "--help":
     case "-h":       printHelp(); return;
@@ -1235,7 +1236,7 @@ function handlePrices(args: string[]): void {
   if (seedFlag) {
     const path = seedPriceFile();
     console.log(`\n  ✓ Price table written to ${path}`);
-    console.log("    Edit prices or add models there; .serf/pricing.json overrides the bundled file.\n");
+    console.log("    Edit prices or add models there; it's part of the serf garden.\n");
     return;
   }
 
@@ -1244,7 +1245,7 @@ function handlePrices(args: string[]): void {
   const onlyLocal = args.includes("--local");
   const onlyCloud = args.includes("--cloud");
   console.log("\n  ═══ MODEL PRICING ($ / M tokens) ═══════════════════");
-  console.log("  Loaded from resources/model-prices.json (or .serf/pricing.json)\n");
+  console.log("  Loaded from .serf/data/pricing.json\n");
   if (names.length === 0) {
     console.log("  (no prices loaded — run `serf prices --seed` to create an editable table)\n");
   }
@@ -1259,6 +1260,51 @@ function handlePrices(args: string[]): void {
   console.log("");
   console.log("  Seed an editable table: serf prices --seed");
   console.log("  Set your spend cap:    serf config set maxSpendPerHarvest <usd>\n");
+}
+
+// ── GARDEN ──
+
+function handleGarden(args: string[]): void {
+  const { renderGarden, checkGarden, ensureGarden, markPruned } = require("./garden");
+  const pruneFlag = args.includes("--prune");
+
+  if (pruneFlag) {
+    const { execSync } = require("node:child_process");
+    const { getSerfDir } = require("./paths");
+    const { join } = require("node:path");
+    const { existsSync, readdirSync, rmSync } = require("node:fs");
+    const serfDir = getSerfDir();
+
+    // Prune stale worktrees
+    const worktreesDir = join(serfDir, "worktrees");
+    if (existsSync(worktreesDir)) {
+      for (const w of readdirSync(worktreesDir)) {
+        try { execSync(`git worktree remove --force "${join(worktreesDir, w)}" 2>/dev/null`, { stdio: "ignore" }); } catch {}
+      }
+      try { execSync(`git worktree prune 2>/dev/null`, { stdio: "ignore" }); } catch {}
+    }
+    // Prune stale retired knowledge
+    const retiredDir = join(serfDir, "knowledge", "retired");
+    if (existsSync(retiredDir)) {
+      for (const f of readdirSync(retiredDir)) {
+        try { rmSync(join(retiredDir, f), { force: true }); } catch {}
+      }
+    }
+    // Prune stale sandboxes
+    const sandboxesDir = join(serfDir, "sandboxes");
+    if (existsSync(sandboxesDir)) {
+      for (const f of readdirSync(sandboxesDir)) {
+        try { rmSync(join(sandboxesDir, f), { recursive: true, force: true }); } catch {}
+      }
+    }
+    markPruned();
+    console.log("\n  ✓ Garden pruned (worktrees, retired knowledge, sandboxes).\n");
+    return;
+  }
+
+  ensureGarden();
+  console.log("\n" + renderGarden() + "\n");
+  console.log("  Prune stale state: serf garden --prune\n");
 }
 
 // ── HELP ──
@@ -1287,6 +1333,8 @@ USAGE:
   serf serf [list|add <name>|show <name>]              Manage sparring partners (serfs)
   serf maturity                                       Show the novel→routine→code ladder
   serf maturity --promote "<label>"                   Promote a repetitive task to a routine
+  serf garden [--prune]                               Show environment freshness / prune stale state
+  serf prices [--seed]                                Show model pricing / seed editable table
 
 PROVIDERS:
   serf supports any LLM backend you can reach:
